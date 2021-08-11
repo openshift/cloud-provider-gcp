@@ -1,8 +1,6 @@
 module k8s.io/cloud-provider-gcp
 
-go 1.27
-
-toolchain go1.27.3
+go 1.22
 
 require (
 	github.com/GoogleCloudPlatform/gke-enterprise-mt v1.37.2
