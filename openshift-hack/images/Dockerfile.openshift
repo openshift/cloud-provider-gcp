@@ -2,8 +2,8 @@ FROM registry.ci.openshift.org/ocp/builder:rhel-8-golang-1.16-openshift-4.9 AS b
 
 WORKDIR /build
 COPY . .
-RUN CGO_ENABLED=0 GOOS=${GOOS} GOPROXY=${GOPROXY} go build \
-	-ldflags="-w -s -X 'main.version=${VERSION}'" \
+RUN CGO_ENABLED=0 go build \
+	-ldflags="-w -s" \
 	-o=gcp-cloud-controller-manager \
 	./cmd/cloud-controller-manager
 
