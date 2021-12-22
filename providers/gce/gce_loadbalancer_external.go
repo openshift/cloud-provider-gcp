@@ -41,10 +41,9 @@ import (
 )
 
 const (
-	errStrLbNoHosts   = "cannot EnsureLoadBalancer() with no hosts"
-	maxNodeNamesToLog = 50
-	// maxForwardedPorts is the maximum number of ports that can be specified in an Forwarding Rule
-	maxForwardedPorts = 5
+	errStrLbNoHosts = "cannot EnsureLoadBalancer() with no hosts"
+
+	ELBRbsFinalizer = "gke.networking.io/l4-netlb-v2"
 )
 
 // ensureExternalLoadBalancer is the external implementation of LoadBalancer.EnsureLoadBalancer.
@@ -56,10 +55,16 @@ const (
 // new load balancers and updating existing load balancers, recognizing when
 // each is needed.
 func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string, apiService *v1.Service, existingFwdRule *compute.ForwardingRule, nodes []*v1.Node) (*v1.LoadBalancerStatus, error) {
-	// Process services with LoadBalancerClass "networking.gke.io/l4-regional-external-legacy" used for this controller.
-	// LoadBalancerClass can't be updated so we know this controller should process the NetLB.
-	// Skip service handling if it uses Regional Backend Services and handled by other controllers
-	if !shouldProcessNetLB(apiService, existingFwdRule) {
+	// Skip service handling if managed by ingress-gce using Regional Backend Services
+	if val, ok := apiService.Annotations[RBSAnnotationKey]; ok && val == RBSEnabled {
+		return nil, cloudprovider.ImplementedElsewhere
+	}
+	// Skip service handling if service has Regional Backend Services finalizer
+	if hasFinalizer(apiService, ELBRbsFinalizer) {
+		return nil, cloudprovider.ImplementedElsewhere
+	}
+	// Skip service handling if it has Regional Backend Service created by Ingress-GCE
+	if existingFwdRule != nil && existingFwdRule.BackendService != "" {
 		return nil, cloudprovider.ImplementedElsewhere
 	}
 
