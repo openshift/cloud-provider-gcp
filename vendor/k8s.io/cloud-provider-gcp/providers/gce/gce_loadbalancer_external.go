@@ -69,12 +69,6 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 		return nil, cloudprovider.ImplementedElsewhere
 	}
 
-	if hasLoadBalancerClass(apiService, LegacyRegionalExternalLoadBalancerClass) {
-		if apiService.Annotations[ServiceAnnotationLoadBalancerType] == string(LBTypeInternal) {
-			g.eventRecorder.Event(apiService, v1.EventTypeWarning, "ConflictingConfiguration", fmt.Sprintf("loadBalancerClass conflicts with %s: %s annotation. External LoadBalancer Service provisioned.", ServiceAnnotationLoadBalancerType, string(LBTypeInternal)))
-		}
-	}
-
 	if len(nodes) == 0 {
 		return nil, fmt.Errorf(errStrLbNoHosts)
 	}
@@ -86,12 +80,6 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 	}
 
 	loadBalancerName := g.GetLoadBalancerName(context.TODO(), clusterName, apiService)
-	klog.Infof("ensureExternalLoadBalancer(%v): Attaching %q finalizer to service %s", loadBalancerName, NetLBFinalizerV1, apiService.Name)
-	if err := addFinalizer(apiService, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
-		klog.Errorf("Failed to attach finalizer '%s' on service %s/%s - %v", NetLBFinalizerV1, apiService.Namespace, apiService.Name, err)
-		return nil, err
-	}
-
 	requestedIP := apiService.Spec.LoadBalancerIP
 	ports := apiService.Spec.Ports
 	portStr := []string{}
@@ -291,7 +279,7 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 
 	if tpNeedsRecreation || fwdRuleNeedsUpdate {
 		klog.Infof("ensureExternalLoadBalancer(%s): Creating forwarding rule, IP %s (tier: %s).", lbRefStr, ipAddressToUse, netTier)
-		if err := createForwardingRule(g, loadBalancerName, serviceName.String(), g.region, ipAddressToUse, g.targetPoolURL(loadBalancerName), ports, netTier, g.enableDiscretePortForwarding); err != nil {
+		if err := createForwardingRule(g, loadBalancerName, serviceName.String(), g.region, ipAddressToUse, g.targetPoolURL(loadBalancerName), ports, netTier); err != nil {
 			return nil, fmt.Errorf("failed to create forwarding rule for load balancer (%s): %v", lbRefStr, err)
 		}
 		// End critical section.  It is safe to release the static IP (which
@@ -310,16 +298,9 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 
 // updateExternalLoadBalancer is the external implementation of LoadBalancer.UpdateLoadBalancer.
 func (g *Cloud) updateExternalLoadBalancer(clusterName string, service *v1.Service, nodes []*v1.Node) error {
-	// Process services with LoadBalancerClass "networking.gke.io/l4-regional-external-legacy" used for this controller.
-	// LoadBalancerClass can't be updated so we know this controller should process the NetLB.
-	// Skip service handling if it uses Regional Backend Services and handled by other controllers
-	if !shouldProcessNetLB(service, nil) {
+	// Skip service update if it uses Regional Backend Services and handled by other controllers
+	if usesL4RBS(service, nil) {
 		return cloudprovider.ImplementedElsewhere
-	}
-
-	if err := addFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
-		klog.Errorf("Failed to attach finalizer '%s' on service %s/%s - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
-		return err
 	}
 
 	hosts, err := g.getInstancesByNames(nodeNames(nodes))
@@ -333,10 +314,8 @@ func (g *Cloud) updateExternalLoadBalancer(clusterName string, service *v1.Servi
 
 // ensureExternalLoadBalancerDeleted is the external implementation of LoadBalancer.EnsureLoadBalancerDeleted
 func (g *Cloud) ensureExternalLoadBalancerDeleted(clusterName, clusterID string, service *v1.Service) error {
-	// Process services with LoadBalancerClass "networking.gke.io/l4-regional-external-legacy" used for this controller.
-	// LoadBalancerClass can't be updated so we know this controller should process the NetLB.
-	// Skip service handling if it uses Regional Backend Services and handled by other controllers
-	if !shouldProcessNetLB(service, nil) {
+	// Skip service deletion if it uses Regional Backend Services and handled by other controllers
+	if usesL4RBS(service, nil) {
 		return cloudprovider.ImplementedElsewhere
 	}
 
@@ -399,12 +378,6 @@ func (g *Cloud) ensureExternalLoadBalancerDeleted(clusterName, clusterID string,
 	)
 	if errs != nil {
 		return utilerrors.Flatten(errs)
-	}
-
-	klog.Infof("ensureExternalLoadBalancerDeleted(%v): Removing %q finalizer from service %s", loadBalancerName, NetLBFinalizerV1, service.Name)
-	if err := removeFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
-		klog.Errorf("Failed to remove finalizer '%s' from service %s - %v", NetLBFinalizerV1, service.Name, err)
-		return err
 	}
 	return nil
 }
@@ -799,31 +772,19 @@ func (g *Cloud) forwardingRuleNeedsUpdate(name, region string, loadBalancerIP st
 		klog.Infof("LoadBalancer ip for forwarding rule %v was expected to be %v, but was actually %v", fwd.Name, fwd.IPAddress, loadBalancerIP)
 		return true, true, fwd.IPAddress, nil
 	}
-
-	protocol, err := getProtocol(ports)
-	if err != nil {
-		return true, false, "", err
-	}
-
-	newPortRange, err := loadBalancerPortRange(ports)
+	portRange, err := loadBalancerPortRange(ports)
 	if err != nil {
 		// Err on the side of caution in case of errors. Caller should notice the error and retry.
 		// We never want to end up recreating resources because g api flaked.
 		return true, false, "", err
 	}
-	newPorts := []string{}
-	if frPorts := getPorts(ports); len(frPorts) <= maxForwardedPorts && g.enableDiscretePortForwarding {
-		newPorts = frPorts
-		newPortRange = ""
-	}
-	frEqualPorts := equalPorts(fwd.Ports, newPorts, fwd.PortRange, newPortRange, g.enableDiscretePortForwarding)
-	if !frEqualPorts {
-		klog.Infof("Forwarding rule port range / ports are not equal, old (port range: %v, ports: %v), new (port range: %v, ports: %v)", fwd.PortRange, fwd.Ports, newPortRange, newPorts)
+	if portRange != fwd.PortRange {
+		klog.Infof("LoadBalancer port range for forwarding rule %v was expected to be %v, but was actually %v", fwd.Name, fwd.PortRange, portRange)
 		return true, true, fwd.IPAddress, nil
 	}
-
-	if string(protocol) != fwd.IPProtocol {
-		klog.Infof("LoadBalancer protocol for forwarding rule %v was expected to be %v, but was actually %v", fwd.Name, fwd.IPProtocol, string(protocol))
+	// The service controller verified all the protocols match on the ports, just check the first one
+	if string(ports[0].Protocol) != fwd.IPProtocol {
+		klog.Infof("LoadBalancer protocol for forwarding rule %v was expected to be %v, but was actually %v", fwd.Name, fwd.IPProtocol, string(ports[0].Protocol))
 		return true, true, fwd.IPAddress, nil
 	}
 
@@ -884,76 +845,27 @@ func hostURLToComparablePath(hostURL string) string {
 	return hostURL[idx:]
 }
 
-func getProtocol(svcPorts []v1.ServicePort) (v1.Protocol, error) {
-	if len(svcPorts) == 0 {
-		return v1.ProtocolTCP, nil
-	}
-	// The service controller verified all the protocols match on the ports, just check and use the first one
-	protocol := svcPorts[0].Protocol
-	if protocol != v1.ProtocolTCP && protocol != v1.ProtocolUDP {
-		return v1.ProtocolTCP, fmt.Errorf("invalid protocol %s, only TCP and UDP are supported", string(protocol))
-	}
-	return protocol, nil
-}
-
-func getPorts(svcPorts []v1.ServicePort) []string {
-	ports := []string{}
-	for _, p := range svcPorts {
-		ports = append(ports, strconv.Itoa(int(p.Port)))
-	}
-
-	return ports
-}
-
-func minMaxPort[T v1.ServicePort | string](svcPorts []T) (int32, int32) {
-	minPort := int32(65536)
-	maxPort := int32(0)
-	for _, svcPort := range svcPorts {
-		port := func(value any) int32 {
-			switch value.(type) {
-			case v1.ServicePort:
-				return value.(v1.ServicePort).Port
-			case string:
-				i, _ := strconv.ParseInt(value.(string), 10, 32)
-				return int32(i)
-			default:
-				return 0
-			}
-		}(svcPort)
-		if port < minPort {
-			minPort = port
-		}
-		if port > maxPort {
-			maxPort = port
-		}
-	}
-	return minPort, maxPort
-}
-
-func loadBalancerPortRange[T v1.ServicePort | string](svcPorts []T) (string, error) {
-	if len(svcPorts) == 0 {
+func loadBalancerPortRange(ports []v1.ServicePort) (string, error) {
+	if len(ports) == 0 {
 		return "", fmt.Errorf("no ports specified for GCE load balancer")
 	}
 
-	minPort, maxPort := minMaxPort(svcPorts)
-	return fmt.Sprintf("%d-%d", minPort, maxPort), nil
-}
+	// The service controller verified all the protocols match on the ports, just check and use the first one
+	if ports[0].Protocol != v1.ProtocolTCP && ports[0].Protocol != v1.ProtocolUDP {
+		return "", fmt.Errorf("invalid protocol %s, only TCP and UDP are supported", string(ports[0].Protocol))
+	}
 
-// equalPorts compares two port ranges or slices of ports. Before comparison,
-// slices of ports are converted into a port range from smallest to largest
-// port. This is done so we don't unnecessarily recreate forwarding rules
-// when upgrading from port ranges to distinct ports, because recreating
-// forwarding rules is traffic impacting.
-func equalPorts(existingPorts, newPorts []string, existingPortRange, newPortRange string, enableDiscretePortForwarding bool) bool {
-	if len(existingPorts) != 0 || !enableDiscretePortForwarding {
-		return equalStringSets(existingPorts, newPorts) && existingPortRange == newPortRange
+	minPort := int32(65536)
+	maxPort := int32(0)
+	for i := range ports {
+		if ports[i].Port < minPort {
+			minPort = ports[i].Port
+		}
+		if ports[i].Port > maxPort {
+			maxPort = ports[i].Port
+		}
 	}
-	// Existing forwarding rule contains a port range. To keep it that way,
-	// compare new list of ports as if it was a port range, too.
-	if len(newPorts) != 0 {
-		newPortRange, _ = loadBalancerPortRange(newPorts)
-	}
-	return existingPortRange == newPortRange
+	return fmt.Sprintf("%d-%d", minPort, maxPort), nil
 }
 
 // translate from what K8s supports to what the cloud provider supports for session affinity.
@@ -1052,31 +964,22 @@ func (g *Cloud) ensureHTTPHealthCheckFirewall(svc *v1.Service, serviceName, ipAd
 	return nil
 }
 
-func createForwardingRule(s CloudForwardingRuleService, name, serviceName, region, ipAddress, target string, ports []v1.ServicePort, netTier cloud.NetworkTier, enableDiscretePortForwarding bool) error {
-	frPorts := getPorts(ports)
-	protocol, err := getProtocol(ports)
-	if err != nil {
-		return err
-	}
+func createForwardingRule(s CloudForwardingRuleService, name, serviceName, region, ipAddress, target string, ports []v1.ServicePort, netTier cloud.NetworkTier) error {
 	portRange, err := loadBalancerPortRange(ports)
 	if err != nil {
 		return err
 	}
 	desc := makeServiceDescription(serviceName)
+	ipProtocol := string(ports[0].Protocol)
 
 	rule := &compute.ForwardingRule{
 		Name:        name,
 		Description: desc,
 		IPAddress:   ipAddress,
-		IPProtocol:  string(protocol),
+		IPProtocol:  ipProtocol,
 		PortRange:   portRange,
 		Target:      target,
 		NetworkTier: netTier.ToGCEValue(),
-	}
-
-	if len(frPorts) <= maxForwardedPorts && enableDiscretePortForwarding {
-		rule.Ports = frPorts
-		rule.PortRange = ""
 	}
 
 	err = s.CreateRegionForwardingRule(rule, region)
