@@ -282,9 +282,6 @@ func getSvcScheme(svc *v1.Service) cloud.LbScheme {
 	if LBTypeInternal == GetLoadBalancerAnnotationType(svc) {
 		return cloud.SchemeInternal
 	}
-	if hasFinalizer(svc, ILBFinalizerV1) || hasFinalizer(svc, ILBFinalizerV2) {
-		return cloud.SchemeInternal
-	}
 	return cloud.SchemeExternal
 }
 
