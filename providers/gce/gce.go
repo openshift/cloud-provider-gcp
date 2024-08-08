@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net/http"
 	"runtime"
 	"strconv"
 	"strings"
@@ -45,7 +44,6 @@ import (
 
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -196,8 +194,6 @@ type Cloud struct {
 	// stackType indicates whether the cluster is a single stack IPv4, single
 	// stack IPv6 or a dual stack cluster
 	stackType StackType
-
-	externalInstanceGroupsPrefix string // If non-"", finds prefixed instance groups for ILB.
 }
 
 // ConfigGlobal is the in memory representation of the gce.conf config data
@@ -235,9 +231,6 @@ type ConfigGlobal struct {
 	// Default to none.
 	// For example: MyFeatureFlag
 	AlphaFeatures []string `gcfg:"alpha-features"`
-	// ExternalInstanceGroupsPrefix, when not-empty, is used to filter instance groups
-	// and include them in the backend for ILB.
-	ExternalInstanceGroupsPrefix string `gcfg:"external-instance-groups-prefix"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -265,14 +258,13 @@ type CloudConfig struct {
 	SubnetworkName       string
 	SubnetworkURL        string
 	// DEPRECATED: Do not rely on this value as it may be incorrect.
-	SecondaryRangeName           string
-	NodeTags                     []string
-	NodeInstancePrefix           string
-	TokenSource                  oauth2.TokenSource
-	UseMetadataServer            bool
-	AlphaFeatureGate             *AlphaFeatureGate
-	StackType                    string
-	ExternalInstanceGroupsPrefix string
+	SecondaryRangeName string
+	NodeTags           []string
+	NodeInstancePrefix string
+	TokenSource        oauth2.TokenSource
+	UseMetadataServer  bool
+	AlphaFeatureGate   *AlphaFeatureGate
+	StackType          string
 }
 
 func init() {
@@ -362,7 +354,6 @@ func generateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 
 		cloudConfig.NodeTags = configFile.Global.NodeTags
 		cloudConfig.NodeInstancePrefix = configFile.Global.NodeInstancePrefix
-		cloudConfig.ExternalInstanceGroupsPrefix = configFile.Global.ExternalInstanceGroupsPrefix
 		cloudConfig.AlphaFeatureGate = NewAlphaFeatureGate(configFile.Global.AlphaFeatures)
 	}
 
@@ -495,11 +486,7 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 		containerService.BasePath = config.ContainerAPIEndpoint
 	}
 
-	client, err := newOauthClient(config.TokenSource)
-	if err != nil {
-		return nil, err
-	}
-	tpuService, err := newTPUService(client)
+	tpuService, err := newTPUService()
 	if err != nil {
 		return nil, err
 	}
@@ -546,32 +533,31 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 	operationPollRateLimiter := flowcontrol.NewTokenBucketRateLimiter(5, 5) // 5 qps, 5 burst.
 
 	gce := &Cloud{
-		service:                      service,
-		serviceAlpha:                 serviceAlpha,
-		serviceBeta:                  serviceBeta,
-		containerService:             containerService,
-		tpuService:                   tpuService,
-		projectID:                    projID,
-		networkProjectID:             netProjID,
-		onXPN:                        onXPN,
-		region:                       config.Region,
-		regional:                     config.Regional,
-		localZone:                    config.Zone,
-		managedZones:                 config.ManagedZones,
-		networkURL:                   networkURL,
-		unsafeIsLegacyNetwork:        isLegacyNetwork,
-		unsafeSubnetworkURL:          subnetURL,
-		secondaryRangeName:           config.SecondaryRangeName,
-		nodeTags:                     config.NodeTags,
-		nodeInstancePrefix:           config.NodeInstancePrefix,
-		useMetadataServer:            config.UseMetadataServer,
-		operationPollRateLimiter:     operationPollRateLimiter,
-		AlphaFeatureGate:             config.AlphaFeatureGate,
-		nodeZones:                    map[string]sets.String{},
-		metricsCollector:             newLoadBalancerMetrics(),
-		projectsBasePath:             getProjectsBasePath(service.BasePath),
-		stackType:                    StackType(config.StackType),
-		externalInstanceGroupsPrefix: config.ExternalInstanceGroupsPrefix,
+		service:                  service,
+		serviceAlpha:             serviceAlpha,
+		serviceBeta:              serviceBeta,
+		containerService:         containerService,
+		tpuService:               tpuService,
+		projectID:                projID,
+		networkProjectID:         netProjID,
+		onXPN:                    onXPN,
+		region:                   config.Region,
+		regional:                 config.Regional,
+		localZone:                config.Zone,
+		managedZones:             config.ManagedZones,
+		networkURL:               networkURL,
+		unsafeIsLegacyNetwork:    isLegacyNetwork,
+		unsafeSubnetworkURL:      subnetURL,
+		secondaryRangeName:       config.SecondaryRangeName,
+		nodeTags:                 config.NodeTags,
+		nodeInstancePrefix:       config.NodeInstancePrefix,
+		useMetadataServer:        config.UseMetadataServer,
+		operationPollRateLimiter: operationPollRateLimiter,
+		AlphaFeatureGate:         config.AlphaFeatureGate,
+		nodeZones:                map[string]sets.String{},
+		metricsCollector:         newLoadBalancerMetrics(),
+		projectsBasePath:         getProjectsBasePath(service.BasePath),
+		stackType:                StackType(config.StackType),
 	}
 
 	gce.manager = &gceServiceManager{gce}
@@ -966,40 +952,6 @@ func findSubnetForRegion(subnetURLs []string, region string) string {
 		}
 	}
 	return ""
-}
-
-func newOauthClient(tokenSource oauth2.TokenSource) (*http.Client, error) {
-	if tokenSource == nil {
-		var err error
-		tokenSource, err = google.DefaultTokenSource(
-			context.Background(),
-			compute.CloudPlatformScope,
-			compute.ComputeScope)
-		klog.Infof("Using DefaultTokenSource %#v", tokenSource)
-		if err != nil {
-			return nil, err
-		}
-	} else {
-		klog.Infof("Using existing Token Source %#v", tokenSource)
-	}
-
-	backoff := wait.Backoff{
-		// These values will add up to about a minute. See #56293 for background.
-		Duration: time.Second,
-		Factor:   1.4,
-		Steps:    10,
-	}
-	if err := wait.ExponentialBackoff(backoff, func() (bool, error) {
-		if _, err := tokenSource.Token(); err != nil {
-			klog.Errorf("error fetching initial token: %v", err)
-			return false, nil
-		}
-		return true, nil
-	}); err != nil {
-		return nil, err
-	}
-
-	return oauth2.NewClient(context.Background(), tokenSource), nil
 }
 
 func (manager *gceServiceManager) getProjectsAPIEndpoint() string {
