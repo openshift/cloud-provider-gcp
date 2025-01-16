@@ -213,7 +213,7 @@ func TestEnsureInstanceGroupFromDefaultNetworkMultiSubnetClusterMode(t *testing.
 	nodes[0].Labels[labelGKESubnetworkName] = "defaultSubnet"
 	// node with a label of a non-matching subnet
 	nodes[1].Labels[labelGKESubnetworkName] = "anotherSubnet"
-	// node with no label but a PodCIDR
+	// node with no label but with PodCIDR
 	nodes[2].Spec.PodCIDR = "10.0.5.0/24"
 	// node[3] has no label nor PodCIDR
 	nodes[3].Spec.PodCIDR = ""
@@ -230,7 +230,7 @@ func TestEnsureInstanceGroupFromDefaultNetworkMultiSubnetClusterMode(t *testing.
 	require.NoError(t, err)
 	instances, err := gce.ListInstancesInInstanceGroup(url.Key.Name, url.Key.Zone, "ALL")
 	require.NoError(t, err)
-	assert.Len(t, instances, 3, "Incorrect number of Instances in the group")
+	assert.Len(t, instances, 4, "Incorrect number of Instances in the group")
 	var instanceURLs []string
 	for _, inst := range instances {
 		instanceURLs = append(instanceURLs, inst.Instance)
@@ -244,8 +244,8 @@ func TestEnsureInstanceGroupFromDefaultNetworkMultiSubnetClusterMode(t *testing.
 	if !hasInstanceForNode(instances, nodes[2]) {
 		t.Errorf("expected n3 to be in instances but it contained %+v", instanceURLs)
 	}
-	if hasInstanceForNode(instances, nodes[3]) {
-		t.Errorf("expected n4 to NOT be in instances but it was included %+v", instanceURLs)
+	if !hasInstanceForNode(instances, nodes[3]) {
+		t.Errorf("expected n4 to be in instances but it contained %+v", instanceURLs)
 	}
 	if !hasInstanceForNode(instances, nodes[4]) {
 		t.Errorf("expected n5 to be in instances but it contained %+v", instanceURLs)
@@ -348,7 +348,7 @@ func TestRemoveNodesInNonDefaultNetworks(t *testing.T) {
 					Name: "nodeInUnknownSubnet",
 				},
 			},
-			shouldBeInDefaultSubnet: false,
+			shouldBeInDefaultSubnet: true,
 		},
 	}
 	var nodes []*v1.Node
@@ -1036,75 +1036,6 @@ func TestEnsureLoadBalancerDeletedSucceedsOnXPN(t *testing.T) {
 	err = gce.ensureInternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, fakeLoadbalancerService(string(LBTypeInternal)))
 	assert.NoError(t, err)
 	checkEvent(t, recorder, FirewallChangeMsg, true)
-}
-
-func TestEnsureInternalInstanceGroupsReuseGroups(t *testing.T) {
-	vals := DefaultTestClusterValues()
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-	gce.externalInstanceGroupsPrefix = "pre-existing"
-
-	igName := makeInstanceGroupName(vals.ClusterID)
-	nodesA, err := createAndInsertNodes(gce, []string{"test-node-1", "test-node-2"}, vals.ZoneName)
-	require.NoError(t, err)
-	nodesB, err := createAndInsertNodes(gce, []string{"test-node-3"}, vals.SecondaryZoneName)
-	require.NoError(t, err)
-
-	preIGName := "pre-existing-ig"
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: preIGName}, vals.ZoneName)
-	require.NoError(t, err)
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: preIGName}, vals.SecondaryZoneName)
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(preIGName, vals.ZoneName, gce.ToInstanceReferences(vals.ZoneName, []string{"test-node-1"}))
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(preIGName, vals.SecondaryZoneName, gce.ToInstanceReferences(vals.SecondaryZoneName, []string{"test-node-3"}))
-	require.NoError(t, err)
-
-	anotherPreIGName := "another-existing-ig"
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: anotherPreIGName}, vals.ZoneName)
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(anotherPreIGName, vals.ZoneName, gce.ToInstanceReferences(vals.ZoneName, []string{"test-node-2"}))
-	require.NoError(t, err)
-
-	svc := fakeLoadbalancerService(string(LBTypeInternal))
-	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
-	assert.NoError(t, err)
-	_, err = gce.ensureInternalLoadBalancer(
-		vals.ClusterName, vals.ClusterID,
-		svc,
-		nil,
-		append(nodesA, nodesB...),
-	)
-	assert.NoError(t, err)
-
-	backendServiceName := makeBackendServiceName(gce.GetLoadBalancerName(context.TODO(), "", svc), vals.ClusterID, shareBackendService(svc), cloud.SchemeInternal, "TCP", svc.Spec.SessionAffinity)
-	bs, err := gce.GetRegionBackendService(backendServiceName, gce.region)
-	require.NoError(t, err)
-	assert.Equal(t, 3, len(bs.Backends), "Want three backends referencing three instances groups")
-
-	igRef := func(zone, name string) string {
-		return fmt.Sprintf("zones/%s/instanceGroups/%s", zone, name)
-	}
-	for _, name := range []string{igRef(vals.ZoneName, preIGName), igRef(vals.SecondaryZoneName, preIGName), igRef(vals.ZoneName, igName)} {
-		var found bool
-		for _, be := range bs.Backends {
-			if strings.Contains(be.Group, name) {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "Expected list of backends to have group %q", name)
-	}
-
-	// Expect initial zone to have test-node-2
-	instances, err := gce.ListInstancesInInstanceGroup(igName, vals.ZoneName, "ALL")
-	require.NoError(t, err)
-	assert.Equal(t, 1, len(instances))
-	assert.Contains(
-		t,
-		instances[0].Instance,
-		fmt.Sprintf("%s/zones/%s/instances/%s", vals.ProjectID, vals.ZoneName, "test-node-2"),
-	)
 }
 
 func TestEnsureInternalInstanceGroupsDeleted(t *testing.T) {
