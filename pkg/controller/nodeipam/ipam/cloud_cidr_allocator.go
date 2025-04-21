@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"strings"
 	"time"
 
 	networkv1 "github.com/GoogleCloudPlatform/gke-networking-api/apis/network/v1"
@@ -34,6 +35,7 @@ import (
 
 	networkinformer "github.com/GoogleCloudPlatform/gke-networking-api/client/network/informers/externalversions/network/v1"
 	networklister "github.com/GoogleCloudPlatform/gke-networking-api/client/network/listers/network/v1"
+	nodetopologyclientset "github.com/GoogleCloudPlatform/gke-networking-api/client/nodetopology/clientset/versioned"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -88,8 +90,9 @@ type cloudCIDRAllocator struct {
 	// nodesSynced returns true if the node shared informer has been synced at least once.
 	nodesSynced cache.InformerSynced
 
-	recorder record.EventRecorder
-	queue    workqueue.RateLimitingInterface
+	recorder          record.EventRecorder
+	queue             workqueue.RateLimitingInterface
+	nodeTopologyQueue *TaskQueue
 
 	stackType clusterStackType
 }
@@ -97,7 +100,7 @@ type cloudCIDRAllocator struct {
 var _ CIDRAllocator = (*cloudCIDRAllocator)(nil)
 
 // NewCloudCIDRAllocator creates a new cloud CIDR allocator.
-func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Interface, nwInformer networkinformer.NetworkInformer, gnpInformer networkinformer.GKENetworkParamSetInformer, nodeInformer informers.NodeInformer, allocatorParams CIDRAllocatorParams) (CIDRAllocator, error) {
+func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Interface, nwInformer networkinformer.NetworkInformer, gnpInformer networkinformer.GKENetworkParamSetInformer, nodeTopologyClient nodetopologyclientset.Interface, nodeInformer informers.NodeInformer, allocatorParams CIDRAllocatorParams) (CIDRAllocator, error) {
 	if client == nil {
 		klog.Fatalf("kubeClient is nil when starting NodeController")
 	}
@@ -128,16 +131,24 @@ func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Inter
 		stackType = stackIPv6
 	}
 
+	nodeTopologySyncer := &NodeTopologySyncer{
+		nodeTopologyClient: nodeTopologyClient,
+		cloud:              gceCloud,
+		nodeLister:         nodeInformer.Lister(),
+	}
+	nodetopologyQueue := NewTaskQueue("nodetopologgTaskQueue", "nodetopologyCRD", nodeTopologyWorkers, nodeTopologyKeyFun, nodeTopologySyncer.sync)
+
 	ca := &cloudCIDRAllocator{
-		client:         client,
-		cloud:          gceCloud,
-		networksLister: nwInformer.Lister(),
-		gnpLister:      gnpInformer.Lister(),
-		nodeLister:     nodeInformer.Lister(),
-		nodesSynced:    nodeInformer.Informer().HasSynced,
-		recorder:       recorder,
-		queue:          workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: workqueueName}),
-		stackType:      stackType,
+		client:            client,
+		cloud:             gceCloud,
+		networksLister:    nwInformer.Lister(),
+		gnpLister:         gnpInformer.Lister(),
+		nodeLister:        nodeInformer.Lister(),
+		nodesSynced:       nodeInformer.Informer().HasSynced,
+		recorder:          recorder,
+		queue:             workqueue.NewRateLimitingQueueWithConfig(workqueue.DefaultControllerRateLimiter(), workqueue.RateLimitingQueueConfig{Name: workqueueName}),
+		nodeTopologyQueue: nodetopologyQueue,
+		stackType:         stackType,
 	}
 
 	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -154,21 +165,34 @@ func NewCloudCIDRAllocator(client clientset.Interface, cloud cloudprovider.Inter
 				return ca.AllocateOrOccupyCIDR(newNode)
 			}
 
-			// Process Node for Multi-Network network-status annotation change
-			var oldVal, newVal string
-			if newNode.Annotations != nil {
-				newVal = newNode.Annotations[networkv1.NodeNetworkAnnotationKey]
-			}
-			if oldNode.Annotations != nil {
-				oldVal = oldNode.Annotations[networkv1.NodeNetworkAnnotationKey]
-			}
-			if oldVal != newVal {
+			// Process Node if multi-network related information changed
+			if nodeMultiNetworkChanged(oldNode, newNode) {
 				return ca.AllocateOrOccupyCIDR(newNode)
 			}
 
 			return nil
 		}),
 		DeleteFunc: nodeutil.CreateDeleteNodeHandler(ca.ReleaseCIDR),
+	})
+	nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc: nodeutil.CreateAddNodeHandler(func(node *v1.Node) error {
+			if ca.nodeTopologyQueue != nil {
+				ca.nodeTopologyQueue.Enqueue(node)
+			}
+			return nil
+		}),
+		UpdateFunc: nodeutil.CreateUpdateNodeHandler(func(oldNode, newNode *v1.Node) error {
+			if ca.nodeTopologyQueue != nil {
+				nodetopologyQueue.Enqueue(newNode)
+			}
+			return nil
+		}),
+		DeleteFunc: nodeutil.CreateDeleteNodeHandler(func(node *v1.Node) error {
+			if ca.nodeTopologyQueue != nil {
+				nodetopologyQueue.Enqueue(node)
+			}
+			return nil
+		}),
 	})
 
 	nwInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -246,6 +270,7 @@ func (ca *cloudCIDRAllocator) Run(stopCh <-chan struct{}) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 	defer cancelFn()
 	defer ca.queue.ShutDown()
+	defer ca.nodeTopologyQueue.Shutdown()
 
 	klog.Infof("Starting cloud CIDR allocator")
 	defer klog.Infof("Shutting down cloud CIDR allocator")
@@ -257,6 +282,18 @@ func (ca *cloudCIDRAllocator) Run(stopCh <-chan struct{}) {
 	for i := 0; i < cidrUpdateWorkers; i++ {
 		go wait.UntilWithContext(ctx, ca.runWorker, time.Second)
 	}
+	if ca.nodeTopologyQueue != nil {
+		ca.nodeTopologyQueue.Run()
+	}
+
+	go func() {
+		time.Sleep(nodeTopologyReconcileInterval)
+		wait.Until(
+			func() {
+				ca.nodeTopologyQueue.Enqueue(nodeTopologyReconcileFakeNode)
+			},
+			nodeTopologyReconcileInterval, stopCh)
+	}()
 
 	<-stopCh
 }
@@ -403,7 +440,7 @@ func (ca *cloudCIDRAllocator) updateCIDRAllocation(nodeName string) error {
 		return err
 	}
 
-	if !reflect.DeepEqual(node.Annotations, oldNode.Annotations) {
+	if !reflect.DeepEqual(node.Annotations, oldNode.Annotations) || !reflect.DeepEqual(node.Status.Capacity, oldNode.Status.Capacity) {
 		// retain old north interfaces annotation
 		var oldNorthInterfacesAnnotation networkv1.NorthInterfacesAnnotation
 		if ann, exists := oldNode.Annotations[networkv1.NorthInterfacesAnnotationKey]; exists {
@@ -434,6 +471,7 @@ func (ca *cloudCIDRAllocator) updateCIDRAllocation(nodeName string) error {
 			}
 		}
 	}
+
 	return err
 }
 
@@ -535,4 +573,47 @@ func isIP6(ipnet *net.IPNet) bool {
 		return false
 	}
 	return ipnet.IP.To4() == nil && ipnet.IP.To16() != nil
+}
+
+// filterMultiNetworkAnnotations filters a node annotation with all multi-network annotations that is watched/updated by CCM
+func filterMultiNetworkAnnotations(annotations map[string]string) map[string]string {
+	if annotations == nil {
+		return nil
+	}
+	filtered := map[string]string{}
+	if val, ok := annotations[networkv1.NodeNetworkAnnotationKey]; ok {
+		filtered[networkv1.NodeNetworkAnnotationKey] = val
+	}
+	if val, ok := annotations[networkv1.MultiNetworkAnnotationKey]; ok {
+		filtered[networkv1.MultiNetworkAnnotationKey] = val
+	}
+	if val, ok := annotations[networkv1.NorthInterfacesAnnotationKey]; ok {
+		filtered[networkv1.NorthInterfacesAnnotationKey] = val
+	}
+	return filtered
+}
+
+// filterMultiNetworkCapacity filters a node capacity with all multi-network IP resources
+func filterMultiNetworkCapacity(capacity v1.ResourceList) v1.ResourceList {
+	if capacity == nil {
+		return nil
+	}
+	filtered := v1.ResourceList{}
+	for k, v := range capacity {
+		resourceName := k.String()
+		if strings.HasPrefix(resourceName, networkv1.NetworkResourceKeyPrefix) && strings.HasSuffix(resourceName, ".IP") {
+			filtered[k] = v.DeepCopy()
+		}
+	}
+	return filtered
+}
+
+func nodeMultiNetworkChanged(oldNode *v1.Node, newNode *v1.Node) bool {
+	if !reflect.DeepEqual(filterMultiNetworkAnnotations(oldNode.GetAnnotations()), filterMultiNetworkAnnotations(newNode.GetAnnotations())) {
+		return true
+	}
+	if !reflect.DeepEqual(filterMultiNetworkCapacity(oldNode.Status.Capacity), filterMultiNetworkCapacity(newNode.Status.Capacity)) {
+		return true
+	}
+	return false
 }
