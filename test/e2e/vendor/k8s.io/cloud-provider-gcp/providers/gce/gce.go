@@ -43,7 +43,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
@@ -846,6 +846,18 @@ func (g *Cloud) updateNodeZones(prevNode, newNode *v1.Node) {
 // HasClusterID returns true if the cluster has a clusterID
 func (g *Cloud) HasClusterID() bool {
 	return true
+}
+
+// SetProjectFromNodeProviderID configures projectFromNodeProviderID option.
+//
+// Enable this ony when the Node's .spec.providerID can be fully trusted.
+func (g *Cloud) SetProjectFromNodeProviderID(enabled bool) {
+	g.projectFromNodeProviderID = enabled
+}
+
+// SetEnableDiscretePortForwarding configures enableDiscretePortForwarding option.
+func (g *Cloud) SetEnableDiscretePortForwarding(enabled bool) {
+	g.enableDiscretePortForwarding = enabled
 }
 
 // getProjectsBasePath returns the compute API endpoint with the `projects/` element.
