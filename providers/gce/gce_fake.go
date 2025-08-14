@@ -75,9 +75,10 @@ func NewFakeGCECloud(vals TestClusterValues) *Cloud {
 		panic(err)
 	}
 	gce := &Cloud{
-		region:              vals.Region,
-		service:             service,
-		managedZones:        []string{vals.ZoneName},
+		region:  vals.Region,
+		service: service,
+		// I don't get why we change this
+		managedZones:        []string{vals.ZoneName, vals.SecondaryZoneName},
 		localZone:           vals.ZoneName,
 		projectID:           vals.ProjectID,
 		networkProjectID:    vals.ProjectID,

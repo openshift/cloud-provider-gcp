@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -632,7 +633,7 @@ func (g *Cloud) ensureInternalHealthCheck(name string, svcName types.NamespacedN
 }
 
 func (g *Cloud) ensureInternalInstanceGroup(name, zone string, nodes []*v1.Node, emptyZoneNodes []*v1.Node) (string, error) {
-	klog.V(2).Infof("ensureInternalInstanceGroup(%v, %v): checking group that it contains %v nodes [node names limited, total number of nodes: %d], the following nodes have empty string in the zone field and won't be deleted: %v", name, zone, loggableNodeNames(nodes), len(nodes), loggableNodeNames(emptyZoneNodes))
+	klog.V(2).Infof("ensureInternalInstanceGroup(%v, %v): checking group that it contains %v nodes [node names limited, total number of nodes: %d], the following nodes have empty string in the zone field and won't be deleted: %v", name, zone, nodes, len(nodes), loggableNodeNames(emptyZoneNodes))
 	ig, err := g.GetInstanceGroup(name, zone)
 	if err != nil && !isNotFound(err) {
 		return "", err
@@ -732,8 +733,15 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 		klog.V(2).Infof("%d nodes have empty zone: %v in region %v", len(emptyZoneNodesNames), emptyZoneNodesNames, g.region)
 	}
 
+	// gceZonedNodes are the nodes that do not have pre existing external instance groups,
+	// defined by the externalInstanceGroupsPrefix.
+	gceZonedNodes := map[string][]string{}
+
 	var igLinks []string
-	for zone, nodes := range zonedNodes {
+	for zone, zNodes := range zonedNodes {
+
+		// Does this break stuff, its new since the patch?
+		// I think we want to drop it, as we're searching for a matching prefix below.
 		if zone == "" {
 			continue // skip ensuring nodes with empty zone
 		}
@@ -746,16 +754,100 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 			for _, ig := range igs {
 				igLinks = append(igLinks, ig.SelfLink)
 			}
-		} else {
-			igLink, err := g.ensureInternalInstanceGroup(name, zone, nodes, zonedNodes[""])
+			break
+		}
+
+		// Skip managing instance groups altogether, using any matching the prefix within the zone.
+
+		// TODO: put this in a helper func where it's well documented AF.
+		hosts, err := g.getFoundInstanceByNames(nodeNames(zNodes))
+		if err != nil {
+			return nil, err
+		}
+
+		// rename: GCEHostNames?
+		names := sets.NewString()
+		for _, h := range hosts {
+			names.Insert(h.Name)
+		}
+
+		// Set of GCEHosts? to not manage
+		skip := sets.NewString()
+
+		// rename: candidateExternalInstanceGroups?
+		igs, err := g.candidateExternalInstanceGroups(zone)
+		if err != nil {
+			return nil, err
+		}
+
+		for _, ig := range igs {
+			if strings.EqualFold(ig.Name, name) {
+				continue
+			}
+
+			// instances in candidate external instance group
+			instances, err := g.ListInstancesInInstanceGroup(ig.Name, zone, allInstances)
 			if err != nil {
 				return nil, err
 			}
-			igLinks = append(igLinks, igLink)
+
+			groupInstances := sets.NewString()
+			// split node name from URL ?
+			for _, ins := range instances {
+				parts := strings.Split(ins.Instance, "/")
+				groupInstances.Insert(parts[len(parts)-1])
+			}
+
+			// if gcehostnames contains all instances in the instance group, we dont need to manage
+			// so add a link, and add to the skip pile
+			if names.HasAll(groupInstances.UnsortedList()...) {
+				igLinks = append(igLinks, ig.SelfLink)
+				skip.Insert(groupInstances.UnsortedList()...)
+			}
+
+		}
+		// for every zoned nodes candidate external instance group, if we have any nodes that dont have an instance group, we need to ensure one - so add to
+		// gceZonedNodes.
+		// this is the implicit skip that allows re-use of existing external instance groups
+		// any nodes in that zone not already part of an instance group
+		if remaining := names.Difference(skip).UnsortedList(); len(remaining) > 0 {
+			gceZonedNodes[zone] = remaining
 		}
 	}
 
+	for zone, gceNodes := range gceZonedNodes {
+		// can we reconstruct v1.Node() objects here? or somewhere further up in this code change?
+		// that way we don't have to change the function sig of `ensureInternalInstanceGroup`
+
+		// reconstruct a []*v1.Node so we can avoid changing the function signature of ensureInternalInstanceGroup, which
+		// avoids merge conflicts when rebasing.
+		nodesForZone := zonedNodes[zone]
+		nodesWeWantInternalInstanceGroupsFor := []*v1.Node{}
+		for _, node := range nodesForZone {
+			if slices.Contains(gceNodes, node.Name) {
+				nodesWeWantInternalInstanceGroupsFor = append(nodesWeWantInternalInstanceGroupsFor, node)
+			}
+		}
+
+		igLink, err := g.ensureInternalInstanceGroup(name, zone, nodesWeWantInternalInstanceGroupsFor, zonedNodes[""])
+		if err != nil {
+			return []string{}, err
+		}
+
+		igLinks = append(igLinks, igLink)
+
+	}
+
 	return igLinks, nil
+}
+
+// candidateExternalInstanceGroups returns instance groups with the external InstanceGroups prefix, if defined.
+func (g *Cloud) candidateExternalInstanceGroups(zone string) ([]*compute.InstanceGroup, error) {
+	if g.externalInstanceGroupsPrefix == "" {
+		return nil, nil
+	}
+
+	return g.ListInstanceGroupsWithPrefix(zone, g.externalInstanceGroupsPrefix)
 }
 
 func (g *Cloud) ensureInternalInstanceGroupsDeleted(name string) error {
