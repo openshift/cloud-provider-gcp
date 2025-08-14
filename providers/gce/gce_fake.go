@@ -109,6 +109,10 @@ func NewFakeGCECloud(vals TestClusterValues) *Cloud {
 		nodeZones:               map[string]sets.String{},
 		firewallRulesManagement: vals.FirewallRulesManagement,
 	}
+	if vals.SecondaryZoneName != "" {
+		gce.managedZones = append(gce.managedZones, vals.SecondaryZoneName)
+	}
+
 	c := cloud.NewMockGCE(&gceProjectRouter{gce})
 	gce.c = c
 	gce.aneService = newFakeANEService()
