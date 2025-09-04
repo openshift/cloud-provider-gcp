@@ -1,10 +1,1 @@
 MERGED_LICENSES
-release/*
-.go-cache/
-.idea/
-.vscode/
-_artifacts/
-_rundir/
-_tmp/
-/bin/
-__pycache__/
