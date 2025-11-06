@@ -41,6 +41,12 @@ import (
 	kcmnames "k8s.io/kubernetes/cmd/kube-controller-manager/names"
 )
 
+const (
+	gkeServiceLBControllerName     = "gke-service-lb-controller"
+	gkeServiceControllerClientName = "gke-service-controller"
+	gkeServiceAlias                = "gke-service"
+)
+
 // enableMultiProject is bound to a command-line flag. When true, it enables the
 // projectFromNodeProviderID option of the GCE cloud provider, instructing it to
 // use the project specified in the Node's providerID for GCE API calls.
@@ -55,6 +61,11 @@ var enableMultiProject bool
 // the same option of the GCE cloud provider to forward individual ports
 // instead of port ranges in Forwarding Rules for external load balancers.
 var enableDiscretePortForwarding bool
+
+// enableRBSDefaultForGCEL4NetLB is bound to a command-line flag. It enables
+// the option to default L4 NetLB to RBS, only controlling NetLB services with
+// LoadBalancerClass
+var enableRBSDefaultForL4NetLB bool
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
@@ -73,6 +84,7 @@ func main() {
 	cloudProviderFS := fss.FlagSet("GCE Cloud Provider")
 	cloudProviderFS.BoolVar(&enableMultiProject, "enable-multi-project", false, "Enables project selection from Node providerID for GCE API calls. CAUTION: Only enable if Node providerID is configured by a trusted source.")
 	cloudProviderFS.BoolVar(&enableDiscretePortForwarding, "enable-discrete-port-forwarding", false, "Enables forwarding of individual ports instead of port ranges for GCE external load balancers.")
+	cloudProviderFS.BoolVar(&enableRBSDefaultForL4NetLB, "enable-rbs-default-l4-netlb", false, "Enables RBS defaulting for GCE L4 NetLB")
 
 	// add new controllers and initializers
 	nodeIpamController := nodeIPAMController{}
@@ -86,10 +98,19 @@ func main() {
 		Constructor: startGkeNetworkParamSetControllerWrapper,
 	}
 
+	controllerInitializers[gkeServiceLBControllerName] = app.ControllerInitFuncConstructor{
+		InitContext: app.ControllerInitContext{
+			ClientName: gkeServiceControllerClientName,
+		},
+		Constructor: startGkeServiceControllerWrapper,
+	}
+
 	// add controllers disabled by default
 	app.ControllersDisabledByDefault.Insert("gkenetworkparamset")
+	app.ControllersDisabledByDefault.Insert(gkeServiceLBControllerName)
 	aliasMap := names.CCMControllerAliases()
 	aliasMap["nodeipam"] = kcmnames.NodeIpamController
+	aliasMap[gkeServiceAlias] = gkeServiceLBControllerName
 	command := app.NewCloudControllerManagerCommand(ccmOptions, cloudInitializer, controllerInitializers, aliasMap, fss, wait.NeverStop)
 
 	logs.InitLogs()
@@ -139,6 +160,16 @@ func cloudInitializer(config *config.CompletedConfig) cloudprovider.Interface {
 			klog.Fatalf("enable-discrete-port-forwarding requires GCE cloud provider, but got %T", cloud)
 		}
 		gceCloud.SetEnableDiscretePortForwarding(true)
+	}
+
+	if enableRBSDefaultForL4NetLB {
+		gceCloud, ok := (cloud).(*gce.Cloud)
+		if !ok {
+			// Fail-fast: If enableRBSDefaultForGCEL4NetLB is set, the cloud
+			// provider MUST be GCE.
+			klog.Fatalf("enable-rbs-default-l4-netlb requires GCE cloud provider, but got %T", cloud)
+		}
+		gceCloud.SetEnableRBSDefaultForL4NetLB(true)
 	}
 
 	return cloud

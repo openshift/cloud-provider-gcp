@@ -720,14 +720,7 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 		klog.Errorf("invalid subnetwork URL configured for the controller, assuming all nodes are in the default subnetwork %s, err: %v", g.SubnetworkURL(), err)
 	}
 
-	// Filter nodes that are already in existing external instance groups.
-	// Returns nodes needing internal instance groups and existing IG links to reuse.
-	filteredNodes, existingIgLinks, err := g.filterNodesWithExistingExternalInstanceGroups(name, nodes)
-	if err != nil {
-		return nil, err
-	}
-
-	zonedNodes := splitNodesByZone(filteredNodes)
+	zonedNodes := splitNodesByZone(nodes)
 	klog.V(2).Infof("ensureInternalInstanceGroups(%v): %d nodes over %d zones in region %v", name, len(nodes), len(zonedNodes), g.region)
 
 	emptyZoneNodesNames := sets.NewString()
@@ -740,8 +733,6 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 	}
 
 	var igLinks []string
-	igLinks = append(igLinks, existingIgLinks...)
-
 	for zone, nodes := range zonedNodes {
 		if zone == "" {
 			continue // skip ensuring nodes with empty zone
