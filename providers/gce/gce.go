@@ -210,6 +210,9 @@ type Cloud struct {
 	// externalInstanceGroupsPrefix if set, finds instance groups with
 	// the provided prefix and considers them for ILB backends.
 	externalInstanceGroupsPrefix string
+
+	// enableRBSDefaultForL4NetLB disable Service controller from picking up services by default
+	enableRBSDefaultForL4NetLB bool
 }
 
 // ConfigGlobal is the in memory representation of the gce.conf config data
@@ -872,6 +875,10 @@ func (g *Cloud) SetProjectFromNodeProviderID(enabled bool) {
 // SetEnableDiscretePortForwarding configures enableDiscretePortForwarding option.
 func (g *Cloud) SetEnableDiscretePortForwarding(enabled bool) {
 	g.enableDiscretePortForwarding = enabled
+}
+
+func (g *Cloud) SetEnableRBSDefaultForL4NetLB(enabled bool) {
+	g.enableRBSDefaultForL4NetLB = enabled
 }
 
 // getProjectsBasePath returns the compute API endpoint with the `projects/` element.
