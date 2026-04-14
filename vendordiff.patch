@@ -1,0 +1,12 @@
+diff -Naupr -x BUILD -x 'AUTHORS*' -x 'CONTRIBUTORS*' vendor/modules.txt openshift-hack/../_tmp/kube-vendor.0TvxRQ/kubernetes/vendor/modules.txt
+--- vendor/modules.txt	2026-04-14 11:51:49.347741446 +0530
++++ openshift-hack/../_tmp/kube-vendor.0TvxRQ/kubernetes/vendor/modules.txt	2026-04-14 11:52:47.605676810 +0530
+@@ -585,6 +585,8 @@ golang.org/x/tools/internal/stdlib
+ golang.org/x/tools/internal/typeparams
+ golang.org/x/tools/internal/typesinternal
+ golang.org/x/tools/internal/versions
++# golang.org/x/tools/go/packages/packagestest v0.1.1-deprecated
++## explicit; go 1.23.0
+ # google.golang.org/api v0.199.0
+ ## explicit; go 1.21
+ google.golang.org/api/compute/v0.alpha
