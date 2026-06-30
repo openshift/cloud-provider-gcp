@@ -118,7 +118,7 @@ func TestEvaluateExternalInstanceGroup(t *testing.T) {
 	masterIG, err := gce.GetInstanceGroup(masterIGName, zone)
 	require.NoError(t, err)
 
-	gceHostNames := sets.NewString(
+	gceHostNames := sets.New(
 		testInfraName+"-master-0",
 		testInfraName+"-worker-a-wnjp7",
 		testInfraName+"-infra-a-zztd5",
