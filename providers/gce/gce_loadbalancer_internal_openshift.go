@@ -65,7 +65,7 @@ func (g *Cloud) filterNodesWithExistingExternalInstanceGroups(name string, nodes
 		}
 
 		// Track instances that are already managed by existing external instance groups
-		instancesInExistingInstanceGroups := sets.NewString()
+		instancesInExistingInstanceGroups := sets.New[string]()
 
 		candidateExternalInstanceGroups, err := g.candidateExternalInstanceGroups(zone)
 		if err != nil {
@@ -122,8 +122,8 @@ func filterNodeObjectFromName(nodesInZone []*v1.Node, nodeNames []string) []*v1.
 }
 
 // extractInstanceNamesFromGroup extracts instance names from a list of instances in an instance group.
-func extractInstanceNamesFromGroup(instances []*compute.InstanceWithNamedPorts) sets.String {
-	instanceNames := sets.NewString()
+func extractInstanceNamesFromGroup(instances []*compute.InstanceWithNamedPorts) sets.Set[string] {
+	instanceNames := sets.New[string]()
 	for _, ins := range instances {
 		// Extract instance name from URL path (e.g., ".../instances/node-name")
 		parts := strings.Split(ins.Instance, "/")
@@ -134,7 +134,7 @@ func extractInstanceNamesFromGroup(instances []*compute.InstanceWithNamedPorts) 
 
 // evaluateExternalInstanceGroup determines if an external instance group can be reused.
 // It returns whether the group should be reused and the set of instance names in the group.
-func (g *Cloud) evaluateExternalInstanceGroup(ig *compute.InstanceGroup, zone string, gceHostNamesInZone sets.String) (shouldReuse bool, instanceNames sets.String, err error) {
+func (g *Cloud) evaluateExternalInstanceGroup(ig *compute.InstanceGroup, zone string, gceHostNamesInZone sets.Set[string]) (shouldReuse bool, instanceNames sets.Set[string], err error) {
 	// Get all instances in this external instance group
 	instances, err := g.ListInstancesInInstanceGroup(ig.Name, zone, allInstances)
 	if err != nil {
@@ -187,14 +187,14 @@ func (g *Cloud) candidateExternalInstanceGroups(zone string) ([]*compute.Instanc
 }
 
 // gceInstanceNamesInZone returns a set of GCE Host names from the list of nodes provided
-func (g *Cloud) gceInstanceNamesInZone(zoneNodes []*v1.Node) (sets.String, error) {
+func (g *Cloud) gceInstanceNamesInZone(zoneNodes []*v1.Node) (sets.Set[string], error) {
 	// hosts is a list of GCE instances matching the zone's node names.
 	hosts, err := g.getFoundInstanceByNames(nodeNames(zoneNodes))
 	if err != nil {
 		return nil, err
 	}
 
-	names := sets.NewString()
+	names := sets.New[string]()
 	for _, h := range hosts {
 		names.Insert(h.Name)
 	}
