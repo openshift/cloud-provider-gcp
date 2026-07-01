@@ -17,6 +17,8 @@ replace (
 replace github.com/onsi/ginkgo/v2 => github.com/openshift/onsi-ginkgo/v2 v2.6.1-0.20260424201627-4d4cc33d669d
 
 require (
+	github.com/onsi/ginkgo/v2 v2.27.2
+	github.com/onsi/gomega v1.39.0
 	github.com/openshift-eng/openshift-tests-extension v0.0.0-20250916161632-d81c09058835
 	github.com/openshift/client-go v0.0.0-20260429123927-c81f86abfa6a
 	github.com/sirupsen/logrus v1.9.4
@@ -80,8 +82,6 @@ require (
 	github.com/modern-go/reflect2 v1.0.3-0.20250322232337-35a7c28c31ee // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/mxk/go-flowrate v0.0.0-20140419014527-cca7078d478f // indirect
-	github.com/onsi/ginkgo/v2 v2.27.2 // indirect
-	github.com/onsi/gomega v1.39.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
 	github.com/openshift/api v0.0.0-20260429122012-1180c0f5c3e9 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
