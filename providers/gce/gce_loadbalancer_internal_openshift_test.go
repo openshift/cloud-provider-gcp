@@ -40,6 +40,10 @@ func fqdnName(short string) string {
 	return fmt.Sprintf("%s.c.%s.internal", short, "test-project")
 }
 
+func igSelfLink(zone, name string) string {
+	return fmt.Sprintf("https://www.googleapis.com/compute/v1/projects/test-project/zones/%s/instanceGroups/%s", zone, name)
+}
+
 func TestFilterNodeObjectFromName(t *testing.T) {
 	t.Parallel()
 	for name, tc := range map[string]struct {
@@ -97,152 +101,230 @@ func TestFilterNodeObjectFromName(t *testing.T) {
 
 func TestEvaluateExternalInstanceGroup(t *testing.T) {
 	t.Parallel()
+
 	vals := DefaultTestClusterValues()
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-	gce.nodeInstancePrefix = testInfraName
 	zone := vals.ZoneName
+	igName := testInfraName + "-master-" + zone
 
-	// CAPG creates one master IG per zone. During install, the bootstrap node
-	// lands in the same IG as the master in that zone (e.g. both master-0 and
-	// bootstrap in <infra>-master-<zone>).
-	masterIGName := testInfraName + "-master-" + zone
-
-	// IG contains only the master. shouldReuse=true via hasAll.
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: masterIGName}, zone)
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(masterIGName, zone, []*compute.InstanceReference{
-		{Instance: fmt.Sprintf("zones/%s/instances/%s-master-0", zone, testInfraName)},
-	})
-	require.NoError(t, err)
-	masterIG, err := gce.GetInstanceGroup(masterIGName, zone)
-	require.NoError(t, err)
-
-	gceHostNames := sets.NewString(
+	// gceHostNames is read-only so safe to share across parallel subtests.
+	gceHostNames := sets.New(
 		testInfraName+"-master-0",
 		testInfraName+"-worker-a-wnjp7",
 		testInfraName+"-infra-a-zztd5",
 	)
-	shouldReuse, instanceNames, err := gce.evaluateExternalInstanceGroup(masterIG, zone, gceHostNames)
-	require.NoError(t, err)
-	assert.True(t, shouldReuse, "should reuse when all IG instances are in zone node list")
-	assert.True(t, instanceNames.Has(testInfraName+"-master-0"))
 
-	// During CAPG install (OCPBUGS-35256): bootstrap node is in the same master
-	// IG as master-0 (same zone). Bootstrap is not a k8s node so hasAll=false,
-	// but all instances share the infra prefix so allHavePrefix=true.
-	err = gce.AddInstancesToInstanceGroup(masterIGName, zone, []*compute.InstanceReference{
-		{Instance: fmt.Sprintf("zones/%s/instances/%s-bootstrap", zone, testInfraName)},
-	})
-	require.NoError(t, err)
+	for name, tc := range map[string]struct {
+		igInstances     []string // short instance names to add to the IG
+		wantShouldReuse bool
+		wantInSet       []string // instance names expected in the returned set; nil skips check
+	}{
+		"all IG instances are known nodes so IG should be reused": {
+			igInstances:     []string{testInfraName + "-master-0"},
+			wantShouldReuse: true,
+			wantInSet:       []string{testInfraName + "-master-0"},
+		},
+		"bootstrap instance is ignored and IG with only known nodes should be reused": {
+			igInstances:     []string{testInfraName + "-master-0", testInfraName + "-bootstrap"},
+			wantShouldReuse: true,
+			wantInSet:       []string{testInfraName + "-master-0"},
+		},
+		"empty instance group should not be reused": {
+			igInstances:     []string{},
+			wantShouldReuse: false,
+		},
+		"IG contains instance not in node list and not matching prefix so IG should not be reused": {
+			igInstances:     []string{"other-cluster-master-0"},
+			wantShouldReuse: false,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	shouldReuse, _, err = gce.evaluateExternalInstanceGroup(masterIG, zone, gceHostNames)
-	require.NoError(t, err)
-	assert.True(t, shouldReuse, "should reuse master IG even with bootstrap node present")
+			gce, err := fakeGCECloud(vals)
+			require.NoError(t, err)
+			gce.nodeInstancePrefix = testInfraName
+
+			err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: igName}, zone)
+			require.NoError(t, err)
+
+			if len(tc.igInstances) > 0 {
+				refs := make([]*compute.InstanceReference, len(tc.igInstances))
+				for i, inst := range tc.igInstances {
+					refs[i] = &compute.InstanceReference{
+						Instance: fmt.Sprintf("zones/%s/instances/%s", zone, inst),
+					}
+				}
+				err = gce.AddInstancesToInstanceGroup(igName, zone, refs)
+				require.NoError(t, err)
+			}
+
+			ig, err := gce.GetInstanceGroup(igName, zone)
+			require.NoError(t, err)
+
+			shouldReuse, instanceNames, err := gce.evaluateExternalInstanceGroup(ig, zone, gceHostNames)
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantShouldReuse, shouldReuse)
+			if tc.wantInSet != nil {
+				assert.ElementsMatch(t, tc.wantInSet, sets.List(instanceNames))
+			}
+		})
+	}
 }
 
-func TestFilterNodesWithExistingExternalInstanceGroups_FQDNNodes(t *testing.T) {
+func TestFilterNodesWithExistingExternalInstanceGroups(t *testing.T) {
 	t.Parallel()
+
 	vals := DefaultTestClusterValues()
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-
-	// Both prefixes are the infra name, matching real cloud config
-	gce.nodeInstancePrefix = testInfraName
-	gce.externalInstanceGroupsPrefix = testInfraName
-
 	zoneA := vals.ZoneName          // us-central1-b
 	zoneB := vals.SecondaryZoneName // us-central1-c
 
-	// GCE instances (short names) across two zones — masters, workers, infra
-	zoneAInstances := []string{
-		testInfraName + "-master-0",
-		testInfraName + "-worker-a-wnjp7",
-		testInfraName + "-infra-a-zztd5",
+	type gceInstanceDef struct {
+		zone string
+		name string
 	}
-	zoneBInstances := []string{
-		testInfraName + "-master-1",
-		testInfraName + "-worker-b-s48dq",
-		testInfraName + "-infra-b-2bn6x",
-	}
-	for _, name := range zoneAInstances {
-		err = gce.InsertInstance(gce.ProjectID(), zoneA, &compute.Instance{
-			Name: name,
-			Tags: &compute.Tags{Items: []string{name}},
-			Zone: zoneA,
-		})
-		require.NoError(t, err)
-	}
-	for _, name := range zoneBInstances {
-		err = gce.InsertInstance(gce.ProjectID(), zoneB, &compute.Instance{
-			Name: name,
-			Tags: &compute.Tags{Items: []string{name}},
-			Zone: zoneB,
-		})
-		require.NoError(t, err)
+	type igDef struct {
+		name      string
+		zone      string
+		instances []string // short instance names
 	}
 
-	// External master IGs per zone (created by installer, match externalInstanceGroupsPrefix)
-	for _, z := range []struct {
-		zone   string
-		master string
+	for name, tc := range map[string]struct {
+		externalInstanceGroupsPrefix string
+		lbIGName                     string
+		gceInstances                 []gceInstanceDef
+		instanceGroups               []igDef
+		nodes                        []*v1.Node
+		wantIGLinks                  []string // full enumeration of expected IG self-links
+		wantIncludedNodes            []string // full enumeration of node names expected in filtered result
+		wantExcludedNodes            []string // node names expected NOT in filtered result
 	}{
-		{zoneA, testInfraName + "-master-0"},
-		{zoneB, testInfraName + "-master-1"},
+		"FQDN nodes covered by external master IGs are filtered out and workers and infra remain": {
+			externalInstanceGroupsPrefix: testInfraName,
+			lbIGName:                     "k8s-ig--test-lb",
+			gceInstances: []gceInstanceDef{
+				{zoneA, testInfraName + "-master-0"},
+				{zoneA, testInfraName + "-worker-a-wnjp7"},
+				{zoneA, testInfraName + "-infra-a-zztd5"},
+				{zoneB, testInfraName + "-master-1"},
+				{zoneB, testInfraName + "-worker-b-s48dq"},
+				{zoneB, testInfraName + "-infra-b-2bn6x"},
+			},
+			instanceGroups: []igDef{
+				{testInfraName + "-master-" + zoneA, zoneA, []string{testInfraName + "-master-0"}},
+				{testInfraName + "-master-" + zoneB, zoneB, []string{testInfraName + "-master-1"}},
+			},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-master-0"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-worker-a-wnjp7"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-infra-a-zztd5"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-master-1"), Labels: map[string]string{v1.LabelTopologyZone: zoneB}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-worker-b-s48dq"), Labels: map[string]string{v1.LabelTopologyZone: zoneB}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-infra-b-2bn6x"), Labels: map[string]string{v1.LabelTopologyZone: zoneB}}},
+			},
+			wantIGLinks: []string{
+				igSelfLink(zoneA, testInfraName+"-master-"+zoneA),
+				igSelfLink(zoneB, testInfraName+"-master-"+zoneB),
+			},
+			wantIncludedNodes: []string{
+				fqdnName(testInfraName + "-worker-a-wnjp7"),
+				fqdnName(testInfraName + "-worker-b-s48dq"),
+				fqdnName(testInfraName + "-infra-a-zztd5"),
+				fqdnName(testInfraName + "-infra-b-2bn6x"),
+			},
+			wantExcludedNodes: []string{
+				fqdnName(testInfraName + "-master-0"),
+				fqdnName(testInfraName + "-master-1"),
+			},
+		},
+		"no external instance groups prefix configured so all nodes remain": {
+			externalInstanceGroupsPrefix: "",
+			lbIGName:                     "k8s-ig--test-lb",
+			gceInstances: []gceInstanceDef{
+				{zoneA, testInfraName + "-master-0"},
+				{zoneA, testInfraName + "-worker-a-wnjp7"},
+			},
+			instanceGroups: []igDef{},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-master-0"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-worker-a-wnjp7"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+			},
+			wantIGLinks: nil,
+			wantIncludedNodes: []string{
+				fqdnName(testInfraName + "-master-0"),
+				fqdnName(testInfraName + "-worker-a-wnjp7"),
+			},
+		},
+		// The LB IG name matches an existing external IG name. filterNodesWithExistingExternalInstanceGroups
+		// skips the IG to avoid treating the LB's own IG as an external group to reuse.
+		"external IG with same name as LB IG is skipped": {
+			externalInstanceGroupsPrefix: testInfraName,
+			lbIGName:                     testInfraName + "-master-" + zoneA,
+			gceInstances: []gceInstanceDef{
+				{zoneA, testInfraName + "-master-0"},
+				{zoneA, testInfraName + "-worker-a-wnjp7"},
+			},
+			instanceGroups: []igDef{
+				{testInfraName + "-master-" + zoneA, zoneA, []string{testInfraName + "-master-0"}},
+			},
+			nodes: []*v1.Node{
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-master-0"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+				{ObjectMeta: metav1.ObjectMeta{Name: fqdnName(testInfraName + "-worker-a-wnjp7"), Labels: map[string]string{v1.LabelTopologyZone: zoneA}}},
+			},
+			wantIGLinks: nil,
+			wantIncludedNodes: []string{
+				fqdnName(testInfraName + "-master-0"),
+				fqdnName(testInfraName + "-worker-a-wnjp7"),
+			},
+		},
 	} {
-		igName := testInfraName + "-master-" + z.zone
-		err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: igName}, z.zone)
-		require.NoError(t, err)
-		err = gce.AddInstancesToInstanceGroup(igName, z.zone, []*compute.InstanceReference{
-			{Instance: fmt.Sprintf("zones/%s/instances/%s", z.zone, z.master)},
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			gce, err := fakeGCECloud(vals)
+			require.NoError(t, err)
+			gce.nodeInstancePrefix = testInfraName
+			gce.externalInstanceGroupsPrefix = tc.externalInstanceGroupsPrefix
+
+			for _, inst := range tc.gceInstances {
+				err = gce.InsertInstance(gce.ProjectID(), inst.zone, &compute.Instance{
+					Name: inst.name,
+					Tags: &compute.Tags{Items: []string{inst.name}},
+					Zone: inst.zone,
+				})
+				require.NoError(t, err)
+			}
+
+			for _, ig := range tc.instanceGroups {
+				err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: ig.name}, ig.zone)
+				require.NoError(t, err)
+				if len(ig.instances) > 0 {
+					refs := make([]*compute.InstanceReference, len(ig.instances))
+					for i, inst := range ig.instances {
+						refs[i] = &compute.InstanceReference{
+							Instance: fmt.Sprintf("zones/%s/instances/%s", ig.zone, inst),
+						}
+					}
+					err = gce.AddInstancesToInstanceGroup(ig.name, ig.zone, refs)
+					require.NoError(t, err)
+				}
+			}
+
+			filteredNodes, existingIGLinks, err := gce.filterNodesWithExistingExternalInstanceGroups(tc.lbIGName, tc.nodes)
+			require.NoError(t, err)
+
+			assert.ElementsMatch(t, tc.wantIGLinks, existingIGLinks)
+			assert.Len(t, filteredNodes, len(tc.wantIncludedNodes))
+
+			filteredNames := sets.NewString()
+			for _, n := range filteredNodes {
+				filteredNames.Insert(n.Name)
+			}
+			for _, nodeName := range tc.wantIncludedNodes {
+				assert.True(t, filteredNames.Has(nodeName), "expected %q in filtered nodes", nodeName)
+			}
+			for _, nodeName := range tc.wantExcludedNodes {
+				assert.False(t, filteredNames.Has(nodeName), "expected %q excluded from filtered nodes", nodeName)
+			}
 		})
-		require.NoError(t, err)
 	}
-
-	// Nodes with FQDN names across both zones — masters, workers, infra
-	nodes := []*v1.Node{
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-master-0"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneA},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-worker-a-wnjp7"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneA},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-infra-a-zztd5"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneA},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-master-1"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneB},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-worker-b-s48dq"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneB},
-		}},
-		{ObjectMeta: metav1.ObjectMeta{
-			Name:   fqdnName(testInfraName + "-infra-b-2bn6x"),
-			Labels: map[string]string{v1.LabelTopologyZone: zoneB},
-		}},
-	}
-
-	lbIGName := "k8s-ig--test-lb"
-	filteredNodes, existingIGLinks, err := gce.filterNodesWithExistingExternalInstanceGroups(lbIGName, nodes)
-	require.NoError(t, err)
-
-	// Masters filtered out (covered by external IGs), workers + infra remain
-	assert.Len(t, existingIGLinks, 2, "one master IG per zone should be reused")
-	assert.Len(t, filteredNodes, 4, "workers and infra nodes should remain for internal IG creation")
-
-	filteredNames := sets.NewString()
-	for _, n := range filteredNodes {
-		filteredNames.Insert(n.Name)
-	}
-	assert.True(t, filteredNames.Has(fqdnName(testInfraName+"-worker-a-wnjp7")))
-	assert.True(t, filteredNames.Has(fqdnName(testInfraName+"-worker-b-s48dq")))
-	assert.True(t, filteredNames.Has(fqdnName(testInfraName+"-infra-a-zztd5")))
-	assert.True(t, filteredNames.Has(fqdnName(testInfraName+"-infra-b-2bn6x")))
-	assert.False(t, filteredNames.Has(fqdnName(testInfraName+"-master-0")))
-	assert.False(t, filteredNames.Has(fqdnName(testInfraName+"-master-1")))
 }
