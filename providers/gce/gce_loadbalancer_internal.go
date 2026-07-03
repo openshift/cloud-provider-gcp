@@ -668,8 +668,23 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 				parts := strings.Split(ins.Instance, "/")
 				groupInstances.Insert(parts[len(parts)-1])
 			}
+
+			// During bootstrap the bootstrap machine is placed in one of the master
+			// instance groups. However, the bootstrap machine does not have an
+			// associated Node. This will prevent us from considering this instance
+			// group for reuse because the instance group contains an instance which is
+			// not in the service's Node list. Consequently we will attempt to add the
+			// masters to a second instance group, which will fail with
+			// INSTANCE_IN_MULTIPLE_LOAD_BALANCED_IGS.
+			//
+			// To avoid this we explicitly exclude the bootstrap machine from
+			// consideration if it is present.
+			bootstrapInstanceName := fmt.Sprintf("%s-bootstrap", g.nodeInstancePrefix)
+			groupInstances.Delete(bootstrapInstanceName)
+
 			groupInstanceNames := groupInstances.UnsortedList()
-			if names.HasAll(groupInstanceNames...) || g.allHaveNodePrefix(groupInstanceNames) {
+			if names.HasAll(groupInstanceNames...) && groupInstances.Len() > 0 {
+				klog.V(2).Infof("ensureInternalInstanceGroups(%v): reusing external instance group %v, instances=%v", name, ig.Name, groupInstanceNames)
 				igLinks = append(igLinks, ig.SelfLink)
 				skip.Insert(groupInstances.UnsortedList()...)
 			}
@@ -694,15 +709,6 @@ func (g *Cloud) candidateExternalInstanceGroups(zone string) ([]*compute.Instanc
 		return nil, nil
 	}
 	return g.ListInstanceGroupsWithPrefix(zone, g.externalInstanceGroupsPrefix)
-}
-
-func (g *Cloud) allHaveNodePrefix(instances []string) bool {
-	for _, instance := range instances {
-		if !strings.HasPrefix(instance, g.nodeInstancePrefix) {
-			return false
-		}
-	}
-	return true
 }
 
 func (g *Cloud) ensureInternalInstanceGroupsDeleted(name string) error {
