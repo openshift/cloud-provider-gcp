@@ -25,8 +25,6 @@ import (
 	"strings"
 	"testing"
 
-	"golang.org/x/oauth2/google"
-
 	cloudprovider "k8s.io/cloud-provider"
 )
 
@@ -352,7 +350,6 @@ func TestGenerateCloudConfigs(t *testing.T) {
 		SubnetworkURL:      "",
 		SecondaryRangeName: "",
 		NodeTags:           []string{"node-tag"},
-		TokenSource:        google.ComputeTokenSource(""),
 		NodeInstancePrefix: "node-prefix",
 		UseMetadataServer:  true,
 		AlphaFeatureGate:   &AlphaFeatureGate{map[string]bool{}},
@@ -375,11 +372,7 @@ func TestGenerateCloudConfigs(t *testing.T) {
 				v.TokenURL = "nil"
 				return v
 			},
-			cloud: func() CloudConfig {
-				v := cloudBoilerplate
-				v.TokenSource = nil
-				return v
-			},
+			cloud: func() CloudConfig { return cloudBoilerplate },
 		},
 		{
 			name: "Network Project ID",
