@@ -686,6 +686,67 @@ func TestEnsureExternalLoadBalancerDeleted(t *testing.T) {
 	}
 }
 
+func TestEnsureExternalLoadBalancerDeletedServiceNotFound(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService("")
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = createExternalLoadBalancer(gce, svc, []string{"test-node-1"}, vals.ClusterName, vals.ClusterID, vals.ZoneName)
+	assert.NoError(t, err)
+
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	if !hasFinalizer(svc, NetLBFinalizerV1) {
+		t.Fatalf("Expected finalizer '%s' not found in Finalizer list - %v", NetLBFinalizerV1, svc.Finalizers)
+	}
+
+	// Delete service from API server before deleting the load balancer.
+	err = gce.client.CoreV1().Services(svc.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	// ensureExternalLoadBalancerDeleted should succeed even though the service doesn't exist,
+	// because removeFinalizer should ignore NotFound errors.
+	err = gce.ensureExternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, svc)
+	assert.NoError(t, err)
+
+	// Assert that GCE resources are deleted. We cannot use assertExternalLbResourcesDeleted
+	// because the service itself has been deleted and cannot be fetched from the API server.
+	lbName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+	hcName := MakeNodesHealthCheckName(vals.ClusterID)
+
+	// Check that Firewalls are deleted for the LoadBalancer and the HealthCheck
+	fwNames := []string{
+		MakeFirewallName(lbName),
+		MakeHealthCheckFirewallName(vals.ClusterID, hcName, true),
+	}
+	for _, fwName := range fwNames {
+		firewall, err := gce.GetFirewall(fwName)
+		require.Error(t, err)
+		assert.Nil(t, firewall)
+	}
+
+	// Check forwarding rule is deleted
+	fwdRule, err := gce.GetRegionForwardingRule(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, fwdRule)
+
+	// Check that TargetPool is deleted
+	pool, err := gce.GetTargetPool(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, pool)
+
+	// Check that HealthCheck is deleted
+	healthcheck, err := gce.GetHTTPHealthCheck(hcName)
+	require.Error(t, err)
+	assert.Nil(t, healthcheck)
+}
+
 func TestLoadBalancerWrongTierResourceDeletion(t *testing.T) {
 	t.Parallel()
 
@@ -1734,105 +1795,6 @@ func TestFirewallNeedsUpdate(t *testing.T) {
 	}
 }
 
-func TestDisabledFirewallOperations(t *testing.T) {
-	vals := DefaultTestClusterValues()
-	vals.FirewallRulesManagement = firewallRulesManagementDisabled
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-
-	fw, err := gce.GetFirewall(MakeFirewallName("test"))
-	assert.NoError(t, err)
-	assert.Nil(t, fw)
-
-	ipnet, err := utilnet.ParseIPNets("0.0.0.0/0")
-	require.NoError(t, err)
-
-	ports := []v1.ServicePort{
-		{Name: "port1", Protocol: v1.ProtocolTCP, Port: int32(80), TargetPort: intstr.FromInt(80)},
-		{Name: "port2", Protocol: v1.ProtocolTCP, Port: int32(81), TargetPort: intstr.FromInt(81)},
-		{Name: "port3", Protocol: v1.ProtocolTCP, Port: int32(82), TargetPort: intstr.FromInt(82)},
-		{Name: "port4", Protocol: v1.ProtocolTCP, Port: int32(84), TargetPort: intstr.FromInt(84)},
-		{Name: "port5", Protocol: v1.ProtocolTCP, Port: int32(85), TargetPort: intstr.FromInt(85)},
-		{Name: "port6", Protocol: v1.ProtocolTCP, Port: int32(86), TargetPort: intstr.FromInt(86)},
-		{Name: "port7", Protocol: v1.ProtocolTCP, Port: int32(88), TargetPort: intstr.FromInt(87)},
-	}
-
-	firewall, err := gce.firewallObject(MakeFirewallName("test"), "Test Description", "0.0.0.0/0", ipnet, ports, nil, firewallPriorityDefault)
-
-	err = gce.CreateFirewall(firewall)
-	assert.NoError(t, err)
-
-	err = gce.UpdateFirewall(firewall)
-	assert.NoError(t, err)
-
-	err = gce.PatchFirewall(firewall)
-	assert.NoError(t, err)
-
-	err = gce.DeleteFirewall(MakeFirewallName("test"))
-	assert.NoError(t, err)
-}
-
-func TestDisabledFirewallNeedsUpdate(t *testing.T) {
-	t.Parallel()
-
-	vals := DefaultTestClusterValues()
-	vals.FirewallRulesManagement = firewallRulesManagementDisabled
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-	svc := fakeLoadbalancerService("")
-
-	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
-	require.NoError(t, err)
-
-	svc.Spec.Ports = []v1.ServicePort{
-		{Name: "port1", Protocol: v1.ProtocolTCP, Port: int32(80), TargetPort: intstr.FromInt(80)},
-		{Name: "port2", Protocol: v1.ProtocolTCP, Port: int32(81), TargetPort: intstr.FromInt(81)},
-		{Name: "port3", Protocol: v1.ProtocolTCP, Port: int32(82), TargetPort: intstr.FromInt(82)},
-		{Name: "port4", Protocol: v1.ProtocolTCP, Port: int32(84), TargetPort: intstr.FromInt(84)},
-		{Name: "port5", Protocol: v1.ProtocolTCP, Port: int32(85), TargetPort: intstr.FromInt(85)},
-		{Name: "port6", Protocol: v1.ProtocolTCP, Port: int32(86), TargetPort: intstr.FromInt(86)},
-		{Name: "port7", Protocol: v1.ProtocolTCP, Port: int32(88), TargetPort: intstr.FromInt(87)},
-	}
-
-	status, err := createExternalLoadBalancer(gce, svc, []string{"test-node-1"}, vals.ClusterName, vals.ClusterID, vals.ZoneName)
-	require.NotNil(t, status)
-	require.NoError(t, err)
-	svcName := "/" + svc.ObjectMeta.Name
-
-	ipAddr := status.status.Ingress[0].IP
-	lbName := gce.GetLoadBalancerName(context.TODO(), "", svc)
-
-	ipnet, err := utilnet.ParseIPNets("0.0.0.0/0")
-	require.NoError(t, err)
-
-	fw, err := gce.GetFirewall(MakeFirewallName(lbName))
-	require.NoError(t, err)
-
-	for desc := range map[string]struct {
-		hasErr bool
-	}{
-		"need to update port-ranges ": {},
-	} {
-		t.Run(desc, func(t *testing.T) {
-			fw, err = gce.GetFirewall(MakeFirewallName(lbName))
-			assert.NoError(t, err)
-			assert.Nil(t, fw)
-
-			exists, needsUpdate, err := gce.firewallNeedsUpdate(
-				lbName,
-				svcName,
-				ipAddr,
-				svc.Spec.Ports,
-				ipnet,
-				int64(firewallPriorityDefault))
-
-			assert.Equal(t, false, exists, "firewall should not exist")
-			assert.Equal(t, false, needsUpdate, "firewall should not exist, no update needed")
-			assert.NoError(t, err)
-		})
-	}
-}
-
 func TestDeleteWrongNetworkTieredResourcesSucceedsWhenNotFound(t *testing.T) {
 	t.Parallel()
 
@@ -2807,4 +2769,75 @@ func TestEnsureExternalLoadBalancerMetrics(t *testing.T) {
 	// Now verify success count is 0 (since we deleted the success service)
 	lm.exportNetLBMetrics()
 	verifyL4NetLBMetric(t, 0, StatusError, DenyFirewallStatusNone)
+}
+
+// TestEnsureExternalLoadBalancerLocalNoOpUpdate ensures that the local health check and firewall are not changed when there is no update
+// to the etp=Local service.
+func TestEnsureExternalLoadBalancerLocalNoOpUpdate(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	nodeNames := []string{"test-node-1"}
+
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService("")
+	svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyTypeLocal
+	svc.Spec.HealthCheckNodePort = int32(10101)
+	svc.Spec.Type = v1.ServiceTypeLoadBalancer
+
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = createExternalLoadBalancer(gce, svc, nodeNames, vals.ClusterName, vals.ClusterID, vals.ZoneName)
+	assert.NoError(t, err)
+
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+
+	// Verification 1
+	// Verify that the local health check is created.
+	hc, err := gce.GetHTTPHealthCheck(loadBalancerName)
+	require.NoError(t, err)
+	assert.Equal(t, loadBalancerName, hc.Name)
+	assert.Equal(t, int64(10101), hc.Port)
+	assert.Equal(t, "/healthz", hc.RequestPath)
+
+	// Verify that the local health check firewall is created.
+	localHcSwName := MakeHealthCheckFirewallName(vals.ClusterID, loadBalancerName, false)
+	localFw, err := gce.GetFirewall(localHcSwName)
+	require.NoError(t, err)
+	assert.NotNil(t, localFw)
+
+	// Verify that the SHARED nodes health check and its firewall are NOT created.
+	sharedHcName := MakeNodesHealthCheckName(vals.ClusterID)
+	_, err = gce.GetHTTPHealthCheck(sharedHcName)
+	assert.True(t, isNotFound(err))
+
+	sharedHcSwName := MakeHealthCheckFirewallName(vals.ClusterID, sharedHcName, true)
+	_, err = gce.GetFirewall(sharedHcSwName)
+	assert.True(t, isNotFound(err))
+
+	// Call gce.ensureExternalLoadBalancer again for no-op update
+	nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+	require.NoError(t, err)
+
+	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
+	assert.NoError(t, err)
+
+	// Verification 2
+	// Re-verify all conditions
+	hc, err = gce.GetHTTPHealthCheck(loadBalancerName)
+	require.NoError(t, err)
+	assert.Equal(t, loadBalancerName, hc.Name)
+
+	localFw, err = gce.GetFirewall(localHcSwName)
+	require.NoError(t, err)
+	assert.NotNil(t, localFw)
+
+	_, err = gce.GetHTTPHealthCheck(sharedHcName)
+	assert.True(t, isNotFound(err))
+
+	_, err = gce.GetFirewall(sharedHcSwName)
+	assert.True(t, isNotFound(err))
 }

@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -65,6 +66,10 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 	// Skip service handling if it uses Regional Backend Services and handled by other controllers
 	if !shouldProcessNetLB(apiService, existingFwdRule, g.enableRBSDefaultForL4NetLB) {
 		return nil, cloudprovider.ImplementedElsewhere
+	}
+
+	if err := g.processMixedProtocolCheck(context.TODO(), apiService, false); err != nil {
+		return nil, err
 	}
 
 	nm := types.NamespacedName{Namespace: apiService.Namespace, Name: apiService.Name}
@@ -322,6 +327,10 @@ func (g *Cloud) updateExternalLoadBalancer(clusterName string, service *v1.Servi
 		return cloudprovider.ImplementedElsewhere
 	}
 
+	if err := g.processMixedProtocolCheck(context.TODO(), service, true); err != nil {
+		return err
+	}
+
 	if err := addFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
 		klog.Errorf("Failed to attach finalizer '%s' on service %s/%s - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
 		return err
@@ -423,7 +432,11 @@ func (g *Cloud) ensureExternalLoadBalancerDeleted(clusterName, clusterID string,
 
 	klog.Infof("ensureExternalLoadBalancerDeleted(%v): Removing %q finalizer from service %s", loadBalancerName, NetLBFinalizerV1, service.Name)
 	if err := removeFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
-		klog.Errorf("Failed to remove finalizer '%s' from service %s - %v", NetLBFinalizerV1, service.Name, err)
+		if apierrors.IsNotFound(err) {
+			klog.Errorf("Failed to remove finalizer '%s' from service %s/%s (not found) - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
+			return nil
+		}
+		klog.Errorf("Failed to remove finalizer '%s' from service %s/%s - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
 		return err
 	}
 	g.metricsCollector.DeleteL4NetLBService(serviceName.String())
@@ -591,7 +604,7 @@ func (g *Cloud) ensureTargetPoolAndHealthCheck(tpExists, tpNeedsRecreation bool,
 				return fmt.Errorf("failed to ensure health check for %v port %d path %v: %v", loadBalancerName, hcToCreate.Port, hcToCreate.RequestPath, err)
 			}
 			// Check whether it is nodes health check, which has different name from the load-balancer.
-			isNodesHealthCheck := hcToCreate.Name != serviceName.Name
+			isNodesHealthCheck := hcToCreate.Name != loadBalancerName
 			if isNodesHealthCheck {
 				// Lock to prevent necessary nodes health check / firewall gets deleted.
 				g.sharedResourceLock.Lock()
@@ -971,11 +984,6 @@ func translateAffinityType(affinityType v1.ServiceAffinity) string {
 }
 
 func (g *Cloud) firewallNeedsUpdate(name, serviceName, ipAddress string, ports []v1.ServicePort, sourceRanges utilnet.IPNetSet, priority int64) (exists bool, needsUpdate bool, err error) {
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("firewallNeedsUpdate(%v): firewall rules are unmanaged", name)
-		return false, false, nil
-	}
-
 	fw, err := g.GetFirewall(MakeFirewallName(name))
 	if err != nil {
 		if isHTTPErrorCode(err, http.StatusNotFound) {
@@ -1025,11 +1033,6 @@ func (g *Cloud) firewallNeedsUpdate(name, serviceName, ipAddress string, ports [
 }
 
 func (g *Cloud) ensureHTTPHealthCheckFirewall(svc *v1.Service, serviceName, ipAddress, region, clusterID string, hosts []*gceInstance, hcName string, hcPort int32, isNodesHealthCheck bool) error {
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("ensureHTTPHealthCheckFirewall(%v): firewall rules are unmanaged", hcName)
-		return nil
-	}
-
 	// Prepare the firewall params for creating / checking.
 	desc := fmt.Sprintf(`{"kubernetes.io/cluster-id":"%s"}`, clusterID)
 	if !isNodesHealthCheck {
@@ -1107,17 +1110,6 @@ func (g *Cloud) createFirewall(svc *v1.Service, name, desc, destinationIP string
 	if err != nil {
 		return err
 	}
-
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("createFirewall(%v): firewall rules are unmanaged", name)
-		project := g.NetworkProjectID()
-		if project == "" {
-			project = g.ProjectID()
-		}
-		g.raiseFirewallChangeNeededEvent(svc, FirewallToGCloudCreateCmd(firewall, project))
-		return nil
-	}
-
 	if err = g.CreateFirewall(firewall); err != nil {
 		if isHTTPErrorCode(err, http.StatusConflict) {
 			return nil

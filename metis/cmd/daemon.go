@@ -17,22 +17,23 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	cliflag "k8s.io/component-base/cli/flag"
 	"k8s.io/klog/v2"
-	"k8s.io/metis/daemon"
+	"k8s.io/metis/pkg/daemon"
 )
 
 func newDaemonCommand() *cobra.Command {
 
-	opts := &DaemonOptions{
-		Config: &daemon.Config{},
-	}
+	opts := newDaemonOptions()
 
 	// Define command-line flags to configure the daemon
-	fss := opts.AddFlags()
+	fss := opts.addFlags()
 
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -40,9 +41,13 @@ func newDaemonCommand() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			cliflag.PrintFlags(cmd.Flags())
 			var cfg daemon.Config
-			_ = opts.ApplyTo(&cfg)
+			_ = opts.applyTo(&cfg)
 			d := daemon.NewDaemon(cfg)
-			if err := d.Run(); err != nil {
+
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+
+			if err := d.Run(ctx); err != nil {
 				klog.ErrorS(err, "Daemon failed to run")
 				os.Exit(1)
 			}

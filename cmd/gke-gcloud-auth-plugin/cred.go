@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -108,6 +108,11 @@ var (
 
 func main() {
 	klog.InitFlags(nil)
+	// Opt into the new klog behavior so that -stderrthreshold is honored even
+	// when -logtostderr=true (the default).
+	// Ref: kubernetes/klog#212, kubernetes/klog#432
+	flag.Set("legacy_stderr_threshold_behavior", "false") //nolint:errcheck
+	flag.Set("stderrthreshold", "INFO")                   //nolint:errcheck
 	defer klog.Flush()
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine) // this is required to setup klog flags
 	pflag.Parse()
@@ -250,7 +255,7 @@ func (p *plugin) accessToken() (string, *metav1.Time, error) {
 
 	token, expiry, err := p.tokenProvider.token()
 	if err != nil {
-		return "", nil, fmt.Errorf("Failed to retrieve access token:: %w", err)
+		return "", nil, fmt.Errorf("failed to retrieve access token: %w", err)
 	}
 
 	if useCache && !expiry.IsZero() {
@@ -340,11 +345,25 @@ func k8sStartingConfig() (*clientcmdapi.Config, error) {
 
 func writeCacheFile(content string) error {
 	cacheFilePath := getCacheFilePath()
-	// File is atomically written with 0600 - the same permissions as ~/.kube/config file.
+	// File is atomically created with 0600 - the same permissions as ~/.kube/config file.
 	// ls ~/.kube/ -al
 	// -rw-------  1 username primarygroup 2836 Jan 27 08:00 config
 	// -rw-------  1 username primarygroup  327 Jan 27 08:00 gke_gcloud_auth_plugin_cache
-	return atomic.WriteFile(cacheFilePath, strings.NewReader(content))
+	//
+	// However if the file already exists, WriteFile honors the existing permissions.
+	// If the file exists we check we have permission to set permissions.
+	// We force the file permissions to 0600 after the file is written to be safe.
+	if _, err := os.Stat(cacheFilePath); err == nil { // File exists
+		err = os.Chmod(cacheFilePath, 0600)
+		if err != nil {
+			return err
+		}
+	}
+	err := atomic.WriteFile(cacheFilePath, strings.NewReader(content))
+	if err != nil {
+		return err
+	}
+	return os.Chmod(cacheFilePath, 0600)
 }
 
 func getCacheFilePath() string {
@@ -369,7 +388,7 @@ func executeCommand(name string, arg ...string) ([]byte, error) {
 }
 
 func readFile(filename string) ([]byte, error) {
-	return ioutil.ReadFile(filename)
+	return os.ReadFile(filename)
 }
 
 func timeNow() time.Time {

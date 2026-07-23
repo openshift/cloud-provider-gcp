@@ -22,18 +22,23 @@ package gce
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/mock"
 	"google.golang.org/api/compute/v1"
+	"google.golang.org/api/googleapi"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -808,6 +813,32 @@ func TestEnsureInternalLoadBalancerDeleted(t *testing.T) {
 	assertInternalLbResourcesDeleted(t, gce, svc, vals, true)
 }
 
+func TestEnsureInternalLoadBalancerDeletedServiceNotFound(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService(string(LBTypeInternal))
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+	syncResult, err := createInternalLoadBalancer(gce, svc, nil, []string{"test-node-1"}, vals.ClusterName, vals.ClusterID, vals.ZoneName)
+	assert.NoError(t, err)
+	assertILBSyncResultAnnotations(t, gce, svc, vals.ClusterID, syncResult)
+
+	// Delete service from API server before deleting the load balancer.
+	err = gce.client.CoreV1().Services(svc.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	// ensureInternalLoadBalancerDeleted should succeed even though the service doesn't exist,
+	// because removeFinalizer should ignore NotFound errors.
+	err = gce.ensureInternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, svc)
+	assert.NoError(t, err)
+
+	assertInternalLbResourcesDeleted(t, gce, svc, vals, true)
+}
+
 func TestSkipInstanceGroupDeletion(t *testing.T) {
 	t.Parallel()
 
@@ -907,7 +938,7 @@ func TestClearPreviousInternalResources(t *testing.T) {
 
 	c.MockRegionBackendServices.DeleteHook = mock.DeleteRegionBackendServicesErrHook
 	c.MockHealthChecks.DeleteHook = mock.DeleteHealthChecksInternalErrHook
-	gce.clearPreviousInternalResources(svc, loadBalancerName, backendSvc, "expectedBSName", "expectedHCName")
+	gce.clearPreviousInternalResources(svc, loadBalancerName, vals.ClusterID, backendSvc, "expectedBSName", "expectedHCName")
 
 	backendSvc, err = gce.GetRegionBackendService(svc.ObjectMeta.Name, gce.region)
 	assert.NoError(t, err)
@@ -921,14 +952,14 @@ func TestClearPreviousInternalResources(t *testing.T) {
 
 	c.MockRegionBackendServices.DeleteHook = mock.DeleteRegionBackendServicesInUseErrHook
 	backendSvc.HealthChecks = []string{hc1.SelfLink}
-	gce.clearPreviousInternalResources(svc, loadBalancerName, backendSvc, "expectedBSName", "expectedHCName")
+	gce.clearPreviousInternalResources(svc, loadBalancerName, vals.ClusterID, backendSvc, "expectedBSName", "expectedHCName")
 
 	hc1, err = gce.GetHealthCheck("hc1")
 	assert.NoError(t, err)
 	assert.NotNil(t, hc1, "HealthCheck should not be deleted when api is mocked out.")
 
 	c.MockHealthChecks.DeleteHook = mock.DeleteHealthChecksInuseErrHook
-	gce.clearPreviousInternalResources(svc, loadBalancerName, backendSvc, "expectedBSName", "expectedHCName")
+	gce.clearPreviousInternalResources(svc, loadBalancerName, vals.ClusterID, backendSvc, "expectedBSName", "expectedHCName")
 
 	hc1, err = gce.GetHealthCheck("hc1")
 	assert.NoError(t, err)
@@ -936,7 +967,7 @@ func TestClearPreviousInternalResources(t *testing.T) {
 
 	c.MockRegionBackendServices.DeleteHook = nil
 	c.MockHealthChecks.DeleteHook = nil
-	gce.clearPreviousInternalResources(svc, loadBalancerName, backendSvc, "expectedBSName", "expectedHCName")
+	gce.clearPreviousInternalResources(svc, loadBalancerName, vals.ClusterID, backendSvc, "expectedBSName", "expectedHCName")
 
 	backendSvc, err = gce.GetRegionBackendService(svc.ObjectMeta.Name, gce.region)
 	assert.Error(t, err)
@@ -974,7 +1005,7 @@ func TestEnsureInternalFirewallDeletesLegacyFirewall(t *testing.T) {
 		[]string{"123"},
 		v1.ProtocolTCP,
 		nodes,
-		"")
+		"", false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring legacy firewall %s for svc %+v", err, lbName, svc)
 	}
@@ -989,7 +1020,7 @@ func TestEnsureInternalFirewallDeletesLegacyFirewall(t *testing.T) {
 		[]string{"123", "456"},
 		v1.ProtocolTCP,
 		nodes,
-		lbName)
+		lbName, false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring firewall %s for svc %+v", err, fwName, svc)
 	}
@@ -1012,7 +1043,7 @@ func TestEnsureInternalFirewallDeletesLegacyFirewall(t *testing.T) {
 		[]string{"123", "456", "789"},
 		v1.ProtocolTCP,
 		nodes,
-		lbName)
+		lbName, false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring firewall %s for svc %+v", err, fwName, svc)
 	}
@@ -1058,7 +1089,7 @@ func TestEnsureInternalFirewallSucceedsOnXPN(t *testing.T) {
 		[]string{"123"},
 		v1.ProtocolTCP,
 		nodes,
-		lbName)
+		lbName, false)
 	require.Nil(t, err, "Should success when XPN is on.")
 
 	checkEvent(t, recorder, FirewallChangeMsg, true)
@@ -1077,7 +1108,7 @@ func TestEnsureInternalFirewallSucceedsOnXPN(t *testing.T) {
 		[]string{"123"},
 		v1.ProtocolTCP,
 		nodes,
-		lbName)
+		lbName, false)
 	require.NoError(t, err)
 	existingFirewall, err := gce.GetFirewall(fwName)
 	require.NoError(t, err)
@@ -1097,7 +1128,7 @@ func TestEnsureInternalFirewallSucceedsOnXPN(t *testing.T) {
 		[]string{"123"},
 		v1.ProtocolTCP,
 		nodes,
-		lbName)
+		lbName, false)
 	require.Nil(t, err, "Should success when XPN is on.")
 
 	checkEvent(t, recorder, FirewallChangeMsg, true)
@@ -1123,75 +1154,6 @@ func TestEnsureLoadBalancerDeletedSucceedsOnXPN(t *testing.T) {
 	err = gce.ensureInternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, fakeLoadbalancerService(string(LBTypeInternal)))
 	assert.NoError(t, err)
 	checkEvent(t, recorder, FirewallChangeMsg, true)
-}
-
-func TestEnsureInternalInstanceGroupsReuseGroups(t *testing.T) {
-	vals := DefaultTestClusterValues()
-	gce, err := fakeGCECloud(vals)
-	require.NoError(t, err)
-	gce.externalInstanceGroupsPrefix = "pre-existing"
-
-	igName := makeInstanceGroupName(vals.ClusterID)
-	nodesA, err := createAndInsertNodes(gce, []string{"test-node-1", "test-node-2"}, vals.ZoneName)
-	require.NoError(t, err)
-	nodesB, err := createAndInsertNodes(gce, []string{"test-node-3"}, vals.SecondaryZoneName)
-	require.NoError(t, err)
-
-	preIGName := "pre-existing-ig"
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: preIGName}, vals.ZoneName)
-	require.NoError(t, err)
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: preIGName}, vals.SecondaryZoneName)
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(preIGName, vals.ZoneName, gce.ToInstanceReferences(vals.ZoneName, []string{"test-node-1"}))
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(preIGName, vals.SecondaryZoneName, gce.ToInstanceReferences(vals.SecondaryZoneName, []string{"test-node-3"}))
-	require.NoError(t, err)
-
-	anotherPreIGName := "another-existing-ig"
-	err = gce.CreateInstanceGroup(&compute.InstanceGroup{Name: anotherPreIGName}, vals.ZoneName)
-	require.NoError(t, err)
-	err = gce.AddInstancesToInstanceGroup(anotherPreIGName, vals.ZoneName, gce.ToInstanceReferences(vals.ZoneName, []string{"test-node-2"}))
-	require.NoError(t, err)
-
-	svc := fakeLoadbalancerService(string(LBTypeInternal))
-	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
-	assert.NoError(t, err)
-	_, err = gce.ensureInternalLoadBalancer(
-		vals.ClusterName, vals.ClusterID,
-		svc,
-		nil,
-		append(nodesA, nodesB...),
-	)
-	assert.NoError(t, err)
-
-	backendServiceName := makeBackendServiceName(gce.GetLoadBalancerName(context.TODO(), "", svc), vals.ClusterID, shareBackendService(svc), cloud.SchemeInternal, "TCP", svc.Spec.SessionAffinity)
-	bs, err := gce.GetRegionBackendService(backendServiceName, gce.region)
-	require.NoError(t, err)
-	assert.Equal(t, 3, len(bs.Backends), "Want three backends referencing three instances groups")
-
-	igRef := func(zone, name string) string {
-		return fmt.Sprintf("zones/%s/instanceGroups/%s", zone, name)
-	}
-	for _, name := range []string{igRef(vals.ZoneName, preIGName), igRef(vals.SecondaryZoneName, preIGName), igRef(vals.ZoneName, igName)} {
-		var found bool
-		for _, be := range bs.Backends {
-			if strings.Contains(be.Group, name) {
-				found = true
-				break
-			}
-		}
-		assert.True(t, found, "Expected list of backends to have group %q", name)
-	}
-
-	// Expect initial zone to have test-node-2
-	instances, err := gce.ListInstancesInInstanceGroup(igName, vals.ZoneName, "ALL")
-	require.NoError(t, err)
-	assert.Equal(t, 1, len(instances))
-	assert.Contains(
-		t,
-		instances[0].Instance,
-		fmt.Sprintf("%s/zones/%s/instances/%s", vals.ProjectID, vals.ZoneName, "test-node-2"),
-	)
 }
 
 func TestEnsureInternalInstanceGroupsDeleted(t *testing.T) {
@@ -2082,7 +2044,7 @@ func TestEnsureInternalFirewallPortRanges(t *testing.T) {
 		getPortRanges(tc.Input),
 		v1.ProtocolTCP,
 		nodes,
-		"")
+		"", false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring legacy firewall %s for svc %+v", err, lbName, svc)
 	}
@@ -2119,7 +2081,7 @@ func TestEnsureInternalFirewallDestinations(t *testing.T) {
 		[]string{"8080"},
 		v1.ProtocolTCP,
 		nodes,
-		"")
+		"", false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring firewall %s for svc %+v", err, fwName, svc)
 	}
@@ -2139,7 +2101,7 @@ func TestEnsureInternalFirewallDestinations(t *testing.T) {
 		[]string{"8080"},
 		v1.ProtocolTCP,
 		nodes,
-		"")
+		"", false)
 	if err != nil {
 		t.Errorf("Unexpected error %v when ensuring firewall %s for svc %+v", err, fwName, svc)
 	}
@@ -2570,4 +2532,208 @@ func TestEnsureInternalLoadBalancerClass(t *testing.T) {
 			assert.ErrorIs(t, err, cloudprovider.ImplementedElsewhere)
 		}
 	}
+}
+
+func TestEnsureInternalBackendServiceConflict(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	nodeNames := []string{"test-node-1"}
+
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService(string(LBTypeInternal))
+	lbName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+	nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+	require.NoError(t, err)
+	igName := makeInstanceGroupName(vals.ClusterID)
+	igLinks, err := gce.ensureInternalInstanceGroups(igName, nodes)
+	require.NoError(t, err)
+
+	sharedBackend := shareBackendService(svc)
+	bsName := makeBackendServiceName(lbName, vals.ClusterID, sharedBackend, cloud.SchemeInternal, "TCP", svc.Spec.SessionAffinity)
+
+	// Create backend initially
+	err = gce.ensureInternalBackendService(bsName, "description", svc.Spec.SessionAffinity, cloud.SchemeInternal, "TCP", igLinks, "")
+	require.NoError(t, err)
+
+	// Mock 412 error
+	c := gce.c.(*cloud.MockGCE)
+	c.MockRegionBackendServices.UpdateHook = func(ctx context.Context, key *meta.Key, obj *compute.BackendService, m *cloud.MockRegionBackendServices, options ...cloud.Option) error {
+		return &googleapi.Error{Code: http.StatusPreconditionFailed, Message: "Precondition Failed"}
+	}
+
+	// Update the Backend Service to trigger the update hook
+	err = gce.ensureInternalBackendService(bsName, "description", v1.ServiceAffinityNone, cloud.SchemeInternal, "TCP", igLinks, "")
+
+	// Verify that the error is propagated
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Precondition Failed")
+	assert.IsType(t, &googleapi.Error{}, err)
+	if gErr, ok := err.(*googleapi.Error); ok {
+		assert.Equal(t, http.StatusPreconditionFailed, gErr.Code)
+	}
+}
+
+func TestResourceLockErrorRecovery(t *testing.T) {
+	t.Parallel()
+	vals := DefaultTestClusterValues()
+	gce, _ := fakeGCECloud(vals)
+	gce.SetEnableL4ILBFineGrainedLocks(true)
+	c := gce.c.(*cloud.MockGCE)
+
+	svc := fakeLoadbalancerService(string(LBTypeInternal))
+	svcName := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+
+	var calls int32
+	c.MockHealthChecks.InsertHook = func(ctx context.Context, key *meta.Key, obj *compute.HealthCheck, m *cloud.MockHealthChecks, options ...cloud.Option) (bool, error) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			return true, &googleapi.Error{Code: http.StatusInternalServerError, Message: "Simulated GCP Error"}
+		}
+		return false, nil
+	}
+
+	// 1st request should error out and release lock
+	_, err := gce.ensureInternalHealthCheck("hc-lock-test", svcName, true, "/", 80)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Simulated GCP Error")
+
+	// 2nd request should successfully acquire the lock, create the health check, and succeed.
+	// We use a channel to ensure that if the lock was leaked, the test fails quickly instead of timing out.
+	errCh := make(chan error, 1)
+	hcCh := make(chan *compute.HealthCheck, 1)
+	go func() {
+		hc, err := gce.ensureInternalHealthCheck("hc-lock-test", svcName, true, "/", 80)
+		errCh <- err
+		hcCh <- hc
+	}()
+
+	select {
+	case err := <-errCh:
+		hc := <-hcCh
+		require.NoError(t, err)
+		assert.NotNil(t, hc)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Deadlock detected: Second request timed out trying to acquire lock. The lock was likely leaked.")
+	}
+
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
+}
+
+func TestEnsureInternalInstanceGroupNodeSyncScaling(t *testing.T) {
+	t.Parallel()
+	vals := DefaultTestClusterValues()
+	gce, _ := fakeGCECloud(vals)
+	gce.SetEnableL4ILBFineGrainedLocks(true)
+	c := gce.c.(*cloud.MockGCE)
+
+	igName := "test-ig-node-scale"
+	zone := vals.ZoneName
+
+	// Inject a small sleep in Get and Insert to widen the race window.
+	c.MockInstanceGroups.GetHook = func(ctx context.Context, key *meta.Key, m *cloud.MockInstanceGroups, options ...cloud.Option) (bool, *compute.InstanceGroup, error) {
+		time.Sleep(2 * time.Millisecond)
+		return false, nil, nil
+	}
+	c.MockInstanceGroups.InsertHook = func(ctx context.Context, key *meta.Key, obj *compute.InstanceGroup, m *cloud.MockInstanceGroups, options ...cloud.Option) (bool, error) {
+		time.Sleep(2 * time.Millisecond)
+		return false, nil
+	}
+
+	var eg errgroup.Group
+	workers := 20
+
+	for i := 0; i < workers; i++ {
+		workerID := i
+		eg.Go(func() error {
+			var nodes []*v1.Node
+			for j := 0; j < (workerID%5)+1; j++ {
+				nodeName := fmt.Sprintf("node-%d", j)
+				nodes = append(nodes, &v1.Node{
+					ObjectMeta: metav1.ObjectMeta{Name: nodeName},
+				})
+			}
+
+			_, err := gce.ensureInternalInstanceGroup(igName, zone, nodes, nil)
+			return err
+		})
+	}
+
+	err := eg.Wait()
+	require.NoError(t, err, "All workers should complete without error")
+
+	// We verify that the final state precisely matches one of the expected valid subsets.
+	instances, err := gce.ListInstancesInInstanceGroup(igName, zone, "ALL")
+	require.NoError(t, err)
+
+	actualNodes := make(map[string]bool)
+	for _, ins := range instances {
+		parts := strings.Split(ins.Instance, "/")
+		actualNodes[parts[len(parts)-1]] = true
+	}
+
+	validStates := []map[string]bool{
+		{"node-0": true},
+		{"node-0": true, "node-1": true},
+		{"node-0": true, "node-1": true, "node-2": true},
+		{"node-0": true, "node-1": true, "node-2": true, "node-3": true},
+		{"node-0": true, "node-1": true, "node-2": true, "node-3": true, "node-4": true},
+	}
+
+	isValid := false
+	for _, state := range validStates {
+		if reflect.DeepEqual(actualNodes, state) {
+			isValid = true
+			break
+		}
+	}
+	assert.True(t, isValid, "Final InstanceGroup count should precisely match exactly one of the known synchronized states, got: %v", actualNodes)
+}
+
+func TestSharedVsNonSharedHealthCheckContention(t *testing.T) {
+	t.Parallel()
+	vals := DefaultTestClusterValues()
+	gce, _ := fakeGCECloud(vals)
+	gce.SetEnableL4ILBFineGrainedLocks(true)
+	c := gce.c.(*cloud.MockGCE)
+
+	svc := fakeLoadbalancerService(string(LBTypeInternal))
+	svcName := types.NamespacedName{Name: svc.Name, Namespace: svc.Namespace}
+
+	var sharedInsertCount int32
+
+	c.MockHealthChecks.InsertHook = func(ctx context.Context, key *meta.Key, obj *compute.HealthCheck, m *cloud.MockHealthChecks, options ...cloud.Option) (bool, error) {
+		time.Sleep(5 * time.Millisecond)
+		if obj.Name == "shared-hc" {
+			atomic.AddInt32(&sharedInsertCount, 1)
+		}
+		return false, nil
+	}
+	c.MockHealthChecks.GetHook = func(ctx context.Context, key *meta.Key, m *cloud.MockHealthChecks, options ...cloud.Option) (bool, *compute.HealthCheck, error) {
+		time.Sleep(5 * time.Millisecond)
+		return false, nil, nil
+	}
+
+	var eg errgroup.Group
+	workers := 50
+
+	for i := 0; i < workers; i++ {
+		workerID := i
+		eg.Go(func() error {
+			if workerID%2 == 0 {
+				_, err := gce.ensureInternalHealthCheck("shared-hc", svcName, true, "/", 80)
+				return err
+			} else {
+				hcName := fmt.Sprintf("unique-hc-%d", workerID)
+				_, err := gce.ensureInternalHealthCheck(hcName, svcName, false, "/", 80)
+				return err
+			}
+		})
+	}
+
+	err := eg.Wait()
+	require.NoError(t, err, "All health check routines should complete without error")
+
+	assert.Equal(t, int32(1), atomic.LoadInt32(&sharedInsertCount), "Shared health check should only be inserted exactly once")
 }
