@@ -1,4 +1,4 @@
-FROM --platform=${BUILDPLATFORM} golang:1.25.8 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.26.5 AS builder
 
 # Install cross-compilers for amd64 and arm64
 RUN apt-get update && apt-get install -y \
@@ -45,13 +45,8 @@ RUN if [ "${TARGETARCH}" = "amd64" ]; then \
 # Always verify any base image upgrades by running `make test-glibc-floor`.
 #
 # See metis/Makefile for the full historical context and version baseline.
-FROM ubuntu:22.04
-RUN apt-get update && apt-get install -y \
-    sqlite3 \
-    && rm -rf /var/lib/apt/lists/*
+FROM gcr.io/distroless/cc-debian13
 WORKDIR /
 COPY --from=builder /app/metis /bin/metis
-COPY --from=builder /app/install-plugin.sh /install-plugin.sh
-RUN chmod +x /install-plugin.sh
 ENTRYPOINT ["/bin/metis"]
 

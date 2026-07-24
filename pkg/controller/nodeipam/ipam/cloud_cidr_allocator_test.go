@@ -34,6 +34,7 @@ import (
 	ntfakeclient "github.com/GoogleCloudPlatform/gke-networking-api/client/nodetopology/clientset/versioned/fake"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/time/rate"
 	"google.golang.org/api/compute/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -104,6 +105,54 @@ func TestBoundedRetries(t *testing.T) {
 	})
 	for hasNodeInProcessing(ca, nodeName) {
 		// wait for node to finish processing (should terminate and not time out)
+	}
+}
+
+func TestCloudCIDRAllocatorRetryLogic(t *testing.T) {
+	nodeName := "testNode"
+	ca := &cloudCIDRAllocator{
+		queue: workqueue.NewRateLimitingQueueWithConfig(
+			workqueue.NewMaxOfRateLimiter(
+				workqueue.NewItemExponentialFailureRateLimiter(updateRetryTimeout, maxUpdateRetryTimeout),
+				&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+			),
+			workqueue.RateLimitingQueueConfig{Name: "cloudCIDRAllocatorTest"},
+		),
+	}
+
+	for i := 0; i < updateMaxRetries; i++ {
+		ca.handleErr(fmt.Errorf("test error"), nodeName)
+		if ca.queue.NumRequeues(nodeName) != i+1 {
+			t.Fatalf("expected %d requeues, got %d", i+1, ca.queue.NumRequeues(nodeName))
+		}
+	}
+
+	ca.handleErr(fmt.Errorf("test error"), nodeName)
+	if ca.queue.NumRequeues(nodeName) != 0 {
+		t.Fatalf("expected item to be dropped from queue and requeues reset, but got %d", ca.queue.NumRequeues(nodeName))
+	}
+}
+
+func TestCloudCIDRAllocatorRateLimiter(t *testing.T) {
+	rl := workqueue.NewMaxOfRateLimiter(
+		workqueue.NewItemExponentialFailureRateLimiter(updateRetryTimeout, maxUpdateRetryTimeout),
+		&workqueue.BucketRateLimiter{Limiter: rate.NewLimiter(rate.Limit(10), 100)},
+	)
+	nodeName := "testNode"
+
+	var lastDelay time.Duration
+	for i := 0; i < updateMaxRetries; i++ {
+		delay := rl.When(nodeName)
+		if delay > maxUpdateRetryTimeout {
+			t.Fatalf("expected delay %v to be <= max retry timeout %v", delay, maxUpdateRetryTimeout)
+		}
+		if delay < lastDelay {
+			t.Fatalf("expected delay %v to be >= previous delay %v", delay, lastDelay)
+		}
+		lastDelay = delay
+	}
+	if lastDelay != maxUpdateRetryTimeout {
+		t.Fatalf("expected final delay to be max retry timeout %v, got %v", maxUpdateRetryTimeout, lastDelay)
 	}
 }
 
@@ -334,6 +383,16 @@ func TestNodeTopologyCR_DeleteNode(t *testing.T) {
 	defer close(stopCh)
 	fakeInformerFactory.Start(stopCh)
 	go cloudAllocator.Run(stopCh)
+
+	// Wait for default node to be processed and default subnet to be added to CR.
+	// This avoids race condition with adding mscnode concurrently.
+	if err := wait.PollImmediate(time.Millisecond*500, wait.ForeverTestTimeout, func() (bool, error) {
+		ok, _ := verifySubnetsInCR(t, []string{"subnet-def"}, nodeTopologyClient)
+		return ok, nil
+	}); err != nil {
+		t.Fatalf("Failed to wait for default subnet in CR: %v", err)
+	}
+
 	mscnode := &v1.Node{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "testNode",
@@ -510,7 +569,9 @@ func TestUpdateCIDRAllocation(t *testing.T) {
 				},
 				Clientset: fake.NewSimpleClientset(),
 			},
-			nodeChanges: func(node *v1.Node) {},
+			nodeChanges:  func(node *v1.Node) {},
+			expectErr:    true,
+			expectErrMsg: "node \"test\" not found",
 		},
 		{
 			name: "want error - provider not set",
