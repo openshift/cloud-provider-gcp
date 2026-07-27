@@ -485,9 +485,40 @@ func GenerateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 	return cloudConfig, err
 }
 
+// clientOptions returns GCP API client options for authentication.
+// A custom TokenSource set in the config, is used directly.
+// Otherwise, FindDefaultCredentials discovers credentials.
+// WithCredentialsJSON is preferred when available as it uses
+// self-signed JWTs, which may be necessary for custom universe domains.
+func clientOptions(ts oauth2.TokenSource) ([]option.ClientOption, error) {
+	if ts != nil {
+		return []option.ClientOption{option.WithTokenSource(ts)}, nil
+	}
+
+	creds, err := google.FindDefaultCredentials(context.Background(), compute.CloudPlatformScope)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find default credentials: %w", err)
+	}
+
+	var opts []option.ClientOption
+	if len(creds.JSON) > 0 {
+		opts = []option.ClientOption{option.WithCredentialsJSON(creds.JSON)}
+	} else {
+		opts = []option.ClientOption{option.WithCredentials(creds)}
+	}
+
+	if ud, err := creds.GetUniverseDomain(); err == nil {
+		opts = append(opts, option.WithUniverseDomain(ud))
+	} else {
+		klog.Warningf("Failed to get universe domain from credentials: %v", err)
+	}
+
+	return opts, nil
+}
+
 // CreateGCECloud creates a Cloud object using the specified parameters.
 // If no networkUrl is specified, loads networkName via rest call.
-// If no tokenSource is specified, uses oauth2.DefaultTokenSource.
+// If no tokenSource is specified, uses FindDefaultCredentials.
 // If managedZones is nil / empty all zones in the region will be managed.
 func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 	// Remove any pre-release version and build metadata from the semver,
@@ -503,19 +534,24 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 		config.NetworkProjectID = config.ProjectID
 	}
 
-	service, err := compute.NewService(context.Background(), option.WithTokenSource(config.TokenSource))
+	clientOpts, err := clientOptions(config.TokenSource)
+	if err != nil {
+		return nil, err
+	}
+
+	service, err := compute.NewService(context.Background(), clientOpts...)
 	if err != nil {
 		return nil, err
 	}
 	service.UserAgent = userAgent
 
-	serviceBeta, err := computebeta.NewService(context.Background(), option.WithTokenSource(config.TokenSource))
+	serviceBeta, err := computebeta.NewService(context.Background(), clientOpts...)
 	if err != nil {
 		return nil, err
 	}
 	serviceBeta.UserAgent = userAgent
 
-	serviceAlpha, err := computealpha.NewService(context.Background(), option.WithTokenSource(config.TokenSource))
+	serviceAlpha, err := computealpha.NewService(context.Background(), clientOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -533,7 +569,7 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 		}
 	}
 
-	containerService, err := container.NewService(context.Background(), option.WithTokenSource(config.TokenSource))
+	containerService, err := container.NewService(context.Background(), clientOpts...)
 	if err != nil {
 		return nil, err
 	}
