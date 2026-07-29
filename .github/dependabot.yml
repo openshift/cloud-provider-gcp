@@ -1,23 +1,20 @@
 version: 2
 updates:
-- package-ecosystem: docker
-  directory: /cluster/gce/gci/mounter
+- package-ecosystem: "github-actions"
+  directory: "/"
   schedule:
-    interval: weekly
+    interval: "weekly"
+    day: "sunday"
   labels:
+  - "ok-to-test"
   - 'area/dependency'
   - 'release-note-none'
-  - 'ok-to-test'
-- package-ecosystem: docker
-  directory: /cluster/addons/addon-manager
-  schedule:
-    interval: weekly
-  labels:
-  - 'area/dependency'
-  - 'release-note-none'
-  - 'ok-to-test'
 - package-ecosystem: gomod
-  directory: /providers
+  directories:
+  - "/"
+  - "/providers"
+  - "/metis"
+  - "/test/e2e"
   schedule:
     interval: weekly
   labels:
@@ -25,11 +22,43 @@ updates:
   - 'release-note-none'
   - 'ok-to-test'
   groups:
-    gomod-dependencies:
+    k8s-dependencies:
       patterns:
-      - '*'
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
+    workspace-deps:
+      patterns:
+        - "*"
+      exclude-patterns:
+        - "k8s.io/*"
+        - "sigs.k8s.io/*"
+- package-ecosystem: "docker"
+  directories:
+  - "/"
+  - "/metis"
+  schedule:
+    interval: "weekly"
+  labels:
+  - "ok-to-test"
+  - 'area/dependency'
+  - 'release-note-none'
+- package-ecosystem: "github-actions"
+  directory: "/"
+  target-branch: "release-1.36"
+  schedule:
+    interval: "weekly"
+    day: "sunday"
+  labels:
+  - "ok-to-test"
+  - 'area/dependency'
+  - 'release-note-none'
 - package-ecosystem: gomod
-  directory: /
+  directories:
+  - "/"
+  - "/providers"
+  - "/metis"
+  - "/test/e2e"
+  target-branch: "release-1.36"
   schedule:
     interval: weekly
   labels:
@@ -37,30 +66,27 @@ updates:
   - 'release-note-none'
   - 'ok-to-test'
   groups:
-    gomod-dependencies:
+    k8s-dependencies:
       patterns:
-      - '*'
-- package-ecosystem: gomod
-  directory: /crd
+      - "k8s.io/*"
+      - "sigs.k8s.io/*"
+    workspace-deps:
+      patterns:
+        - "*"
+      exclude-patterns:
+        - "k8s.io/*"
+        - "sigs.k8s.io/*"
+- package-ecosystem: "docker"
+  directories:
+  - "/"
+  - "/metis"
+  target-branch: "release-1.36"
   schedule:
-    interval: weekly
+    interval: "weekly"
   labels:
+  - "ok-to-test"
   - 'area/dependency'
   - 'release-note-none'
-  - 'ok-to-test'
-  groups:
-    gomod-dependencies:
-      patterns:
-      - '*'
-- package-ecosystem: gomod
-  directory: /crd/hack
-  schedule:
-    interval: weekly
-  labels:
-  - 'area/dependency'
-  - 'release-note-none'
-  - 'ok-to-test'
-  groups:
-    gomod-dependencies:
-      patterns:
-      - '*'
+
+
+

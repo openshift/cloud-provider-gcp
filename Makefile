@@ -14,9 +14,11 @@
 
 PROJECT_DIR := $(shell dirname $(abspath $(lastword $(MAKEFILE_LIST))))
 LOCAL_BIN := $(PROJECT_DIR)/bin
+
+include Makefile-deps.mk
 GCP_PROJECT ?= $(shell gcloud config get-value project)
 
-GIT_VERSION := $(shell git describe --tags --always --dirty | sed 's|.*/||')
+GIT_VERSION := $(shell git describe --tags --always --dirty | sed 's|.*/||' | tr -cd '[:alnum:].-')
 GIT_COMMIT := $(shell git rev-parse HEAD)
 BUILD_DATE := $(shell date -u +'%Y-%m-%dT%H:%M:%SZ')
 BUCKET_NAME ?= k8s-staging-cloud-provider-gcp
@@ -130,7 +132,7 @@ copy-binaries-to-gcs: build-all ## Build and copy binaries to GCS.
 	gcloud storage cp --recursive release/$(GIT_VERSION) gs://$(BUCKET_NAME)/$(GIT_VERSION)
 
 .PHONY: release-tars
-release-tars: release-tars-linux-amd64 release-tars-windows-amd64 release-manifests generate-all-checksums ## Build all release artifacts.
+release-tars: release-tars-linux-amd64 release-tars-windows-amd64 generate-all-checksums ## Build all release artifacts.
 
 # Helper for release-tars, not intended for direct use.
 .PHONY: .ensure-kube-version
@@ -200,56 +202,8 @@ release-tars-windows-amd64: auth-provider-gcp-windows-amd64 ## Build release art
 	rm -rf release/$(GIT_VERSION)/node-windows
 	@echo "Windows amd64 release tarball created in release/$(GIT_VERSION)/"
 
-.PHONY: release-manifests
-release-manifests: .ensure-kube-version ## Build the kubernetes-manifests.tar.gz artifact.
-	# Pack kubernetes-manifests.tar.gz
-	# 1. Download and unpack the UPSTREAM manifests
-	@echo "Packing kubernetes-manifests.tar.gz..."
-	mkdir -p release/$(GIT_VERSION)/manifests release/upstream-manifests
-	curl -L "https://dl.k8s.io/release/$$(cat release/$(GIT_VERSION)/kube-version.txt)/kubernetes-manifests.tar.gz" -o release/upstream-manifests/manifests.tar.gz
-	tar xzf release/upstream-manifests/manifests.tar.gz -C release/$(GIT_VERSION)/manifests
-
-
-	# 2. OVERLAY your local changes from the cloud-provider-gcp repo
-	# Standard addons should go in the 'addons' directory
-	mkdir -p release/$(GIT_VERSION)/manifests/kubernetes/addons
-	cp -r cluster/addons/* release/$(GIT_VERSION)/manifests/kubernetes/addons/
-	# Additional GCE-specific addons
-	cp -r cluster/gce/addons/* release/$(GIT_VERSION)/manifests/kubernetes/addons/ || true
-
-	# GCE specific configs go in 'gci-trusty'
-	# Ensure gci-trusty dir exists
-	mkdir -p release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty
-	cp cluster/gce/manifests/*.manifest release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/
-	# Ignore errors for json/yaml if they don't exist
-	cp cluster/gce/manifests/*.json release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/ || true
-	cp cluster/gce/manifests/*.yaml release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/ || true
-	# Substitute variables in manifests
-	find release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty -name "*.manifest" -exec sed -i "s|{{pillar\['cloud-controller-manager_docker_tag'\]}}|$(GIT_VERSION)|g" {} +
-
-	# Substitute variables in addons
-	find release/$(GIT_VERSION)/manifests/kubernetes/addons -name "*.yaml" -exec sed -i "s|{{ fluentd_gcp_yaml_version }}|$(FLUENTD_GCP_YAML_VERSION)|g" {} +
-	find release/$(GIT_VERSION)/manifests/kubernetes/addons -name "*.yaml" -exec sed -i "s|{{ fluentd_gcp_version }}|$(FLUENTD_GCP_VERSION)|g" {} +
-	find release/$(GIT_VERSION)/manifests/kubernetes/addons -name "*.yaml" -exec sed -i "s|{{ prometheus_to_sd_prefix }}|$(PROMETHEUS_TO_SD_PREFIX)|g" {} +
-	find release/$(GIT_VERSION)/manifests/kubernetes/addons -name "*.yaml" -exec sed -i "s|{{ prometheus_to_sd_endpoint }}|$(PROMETHEUS_TO_SD_ENDPOINT)|g" {} +
-	find release/$(GIT_VERSION)/manifests/kubernetes/addons -name "*.yaml" -exec sed -i "s|{{ fluentd_gcp_configmap_name }}|$(FLUENTD_GCP_CONFIGMAP_NAME)|g" {} +
-
-	# Include cri-auth-config if present
-	cp cluster/gce/manifests/cri-auth-config.yaml release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/ || true
-	
-	cp cluster/gce/gci/configure-helper.sh release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/gci-configure-helper.sh
-	cp cluster/gce/gci/configure-helper.sh release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/configure-helper.sh
-	cp cluster/gce/gci/configure-kubeapiserver.sh release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/configure-kubeapiserver.sh
-	if [ -f cluster/gce/gci/gke-internal-configure-helper.sh ]; then \
-		cp cluster/gce/gci/gke-internal-configure-helper.sh release/$(GIT_VERSION)/manifests/kubernetes/gci-trusty/; \
-	fi
-	# 3. Repack the combined manifests
-	tar -czf release/$(GIT_VERSION)/kubernetes-manifests.tar.gz -C release/$(GIT_VERSION)/manifests .
-	rm -rf release/$(GIT_VERSION)/manifests release/upstream-manifests
-	@echo "Manifests artifact generated in release/$(GIT_VERSION)"
-
 .PHONY: generate-all-checksums
-generate-all-checksums: release-tars-linux-amd64 release-tars-windows-amd64 release-manifests ## Generate checksums for all release artifacts.
+generate-all-checksums: release-tars-linux-amd64 release-tars-windows-amd64 ## Generate checksums for all release artifacts.
 	# Final step: generate checksums for all artifacts.
 	@echo "Generating Checksums for all release artifacts..."
 	@if [ -f release/$(GIT_VERSION)/kubernetes-server-linux-amd64.tar.gz ]; then \
@@ -264,10 +218,6 @@ generate-all-checksums: release-tars-linux-amd64 release-tars-windows-amd64 rele
 		shasum -a 1 release/$(GIT_VERSION)/kubernetes-node-linux-amd64.tar.gz | awk '{print $$1}' > release/$(GIT_VERSION)/kubernetes-node-linux-amd64.tar.gz.sha1; \
 		shasum -a 256 release/$(GIT_VERSION)/kubernetes-node-linux-amd64.tar.gz | awk '{print $$1}' > release/$(GIT_VERSION)/kubernetes-node-linux-amd64.tar.gz.sha256; \
 	fi
-	@if [ -f release/$(GIT_VERSION)/kubernetes-manifests.tar.gz ]; then \
-		shasum -a 1 release/$(GIT_VERSION)/kubernetes-manifests.tar.gz | awk '{print $$1}' > release/$(GIT_VERSION)/kubernetes-manifests.tar.gz.sha1; \
-		shasum -a 256 release/$(GIT_VERSION)/kubernetes-manifests.tar.gz | awk '{print $$1}' > release/$(GIT_VERSION)/kubernetes-manifests.tar.gz.sha256; \
-	fi
 	@echo "Release artifacts generated in release/$(GIT_VERSION)"
 
 ## --------------------------------------
@@ -279,18 +229,12 @@ test: ## Run unit tests.
 	go test -race ./...
 	go test -race ./providers/...
 
-.PHONY: test-sh
-test-sh: ## Run shell script syntax checks.
-	bash -n cluster/common.sh
-	bash -n cluster/clientbin.sh
-	bash -n cluster/kube-util.sh
-
 ## --------------------------------------
 ##@ Tools
 ## --------------------------------------
 
 .PHONY: verify
-verify: ## Run all verification scripts.
+verify: golangci-lint ## Run all verification scripts.
 	./tools/verify-all.sh
 
 .PHONY: update-vendor
@@ -308,10 +252,6 @@ update-golang: ## Update golang version.
 .PHONY: pin-k8s-deps
 pin-k8s-deps: ## Pin Kubernetes dependencies.
 	./tools/pin_k8s_deps.sh
-
-.PHONY: bump-cluster
-bump-cluster: ## Bump cluster version.
-	./tools/bump_cluster.sh
 
 .PHONY: push-images
 push-images: ## Push images to IMAGE_REPO.
@@ -335,7 +275,7 @@ print-k8s-version: ## Print the pinned Kubernetes version.
 	@if [ -f ginko-test-package-version.env ]; then cat ginko-test-package-version.env | tr -d '[:space:]'; else curl -sL https://dl.k8s.io/release/stable.txt; fi
 
 ## --------------------------------------
-##@ kOps E2E
+##@ Test Cluster E2E
 ## --------------------------------------
 
 KOPS_CLUSTER_NAME ?= kops-e2e.k8s.local
@@ -345,40 +285,29 @@ IMAGE_REPO ?= gcr.io/$(GCP_PROJECT)
 KOPS_STATE_STORE ?= gs://kops-state-$(GCP_PROJECT)
 IMAGE_TAG ?= $(shell git rev-parse --short HEAD)
 
-.PHONY: kops-simple
-kops-simple: ## Run kOps simple E2E test scenario.
+# Defaults for kOps E2E tests
+KOPS_FOCUS_REGEX ?= "\[Conformance\]"
+KOPS_SKIP_REGEX ?= "\[Serial\]"
+TEST_ARGS ?=
+
+
+.PHONY: test-cluster-simple
+test-cluster-simple: ## Run test cluster simple E2E test scenario.
 	./e2e/scenarios/kops-simple
 
-.PHONY: install-kops-deps
-install-kops-deps: ## Install kubetest2 and other dependencies.
-	@echo "Installing kubetest2 and plugins..."
-	@mkdir -p $(LOCAL_BIN)
-	@GOBIN=$(LOCAL_BIN) go install sigs.k8s.io/kubetest2@latest
-	@GOBIN=$(LOCAL_BIN) go install sigs.k8s.io/kubetest2/kubetest2-tester-ginkgo@latest
-	@TEMP_DIR=$$(mktemp -d); \
-	trap 'rm -rf "$$TEMP_DIR"' EXIT; \
-	git clone --depth 1 https://github.com/kubernetes/kops.git "$$TEMP_DIR"; \
-	cd "$$TEMP_DIR/tests/e2e" && GOBIN=$(LOCAL_BIN) go install ./kubetest2-kops ./kubetest2-tester-kops
-	@echo "Downloading latest green kOps binary..."
-	@KOPS_BASE_URL=$$(curl -s https://storage.googleapis.com/k8s-staging-kops/kops/releases/markers/master/latest-ci-updown-green.txt); \
-	mkdir -p $(LOCAL_BIN); \
-	wget -qO $(LOCAL_BIN)/kops.tmp $${KOPS_BASE_URL}/linux/amd64/kops; \
-	chmod +x $(LOCAL_BIN)/kops.tmp; \
-	mv $(LOCAL_BIN)/kops.tmp $(LOCAL_BIN)/kops
-
-.PHONY: kops-tool
-kops-tool: $(LOCAL_BIN)/gkops ## Build the kOps lifecycle tool.
+.PHONY: test-cluster-tool
+test-cluster-tool: $(LOCAL_BIN)/gkops ## Build the test cluster lifecycle tool.
 
 $(LOCAL_BIN)/gkops: tools/kops/main.go tools/kops/pkg/kops/*.go
 	@echo "Building kOps lifecycle tool..."
 	mkdir -p $(LOCAL_BIN)
 	go build -o $(LOCAL_BIN)/gkops tools/kops/main.go
 
-.PHONY: kops-setup
-kops-setup: install-kops-deps kops-tool push-images ## Setup environment for kOps E2E.
+.PHONY: test-cluster-setup
+test-cluster-setup: install-test-cluster-deps test-cluster-tool push-images ## Setup environment for test cluster E2E.
 
-.PHONY: kops-up
-kops-up: kops-setup ## Provision kOps cluster.
+.PHONY: test-cluster-up
+test-cluster-up: test-cluster-setup ## Provision test cluster.
 	PATH=$(LOCAL_BIN):$(PATH) KOPS_STATE_STORE=$(KOPS_STATE_STORE) $(LOCAL_BIN)/gkops up \
 		--cluster-name=$(KOPS_CLUSTER_NAME) \
 		--gcp-project=$(GCP_PROJECT) \
@@ -388,15 +317,15 @@ kops-up: kops-setup ## Provision kOps cluster.
 		--image-repo=$(IMAGE_REPO) \
 		--image-tag=$(IMAGE_TAG)
 
-.PHONY: kops-down
-kops-down: kops-tool ## Tear down kOps cluster.
+.PHONY: test-cluster-down
+test-cluster-down: test-cluster-tool ## Tear down test cluster.
 	PATH=$(LOCAL_BIN):$(PATH) KOPS_STATE_STORE=$(KOPS_STATE_STORE) $(LOCAL_BIN)/gkops down \
 		--cluster-name=$(KOPS_CLUSTER_NAME) \
 		--gcp-project=$(GCP_PROJECT) \
 		--state-store=$(KOPS_STATE_STORE)
 
-.PHONY: kops-e2e-test
-kops-e2e-test: kops-tool ## Run E2E tests on kOps cluster.
+.PHONY: test-cluster-e2e-test
+test-cluster-e2e-test: test-cluster-tool ## Run E2E tests on test cluster.
 	@echo "Running E2E tests on cluster $(KOPS_CLUSTER_NAME)..."
 	PATH=$(LOCAL_BIN):$(PATH) KOPS_STATE_STORE=$(KOPS_STATE_STORE) KOPS_CLUSTER_NAME= CLUSTER_NAME= $(LOCAL_BIN)/kubetest2 kops \
 		-v=2 \
@@ -410,6 +339,8 @@ kops-e2e-test: kops-tool ## Run E2E tests on kOps cluster.
 		-- \
 		--parallel=30 \
 		--test-package-version="${K8S_VERSION}" \
-		--skip-regex="\[Serial\]" \
-		--focus-regex="\[Conformance\]"
+		--skip-regex="$(KOPS_SKIP_REGEX)" \
+		--focus-regex="$(KOPS_FOCUS_REGEX)" \
+		$(if $(TEST_ARGS),--test-args="$(TEST_ARGS)")
+
 

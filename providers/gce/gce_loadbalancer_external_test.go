@@ -686,6 +686,67 @@ func TestEnsureExternalLoadBalancerDeleted(t *testing.T) {
 	}
 }
 
+func TestEnsureExternalLoadBalancerDeletedServiceNotFound(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService("")
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = createExternalLoadBalancer(gce, svc, []string{"test-node-1"}, vals.ClusterName, vals.ClusterID, vals.ZoneName)
+	assert.NoError(t, err)
+
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Get(context.TODO(), svc.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	if !hasFinalizer(svc, NetLBFinalizerV1) {
+		t.Fatalf("Expected finalizer '%s' not found in Finalizer list - %v", NetLBFinalizerV1, svc.Finalizers)
+	}
+
+	// Delete service from API server before deleting the load balancer.
+	err = gce.client.CoreV1().Services(svc.Namespace).Delete(context.TODO(), svc.Name, metav1.DeleteOptions{})
+	require.NoError(t, err)
+
+	// ensureExternalLoadBalancerDeleted should succeed even though the service doesn't exist,
+	// because removeFinalizer should ignore NotFound errors.
+	err = gce.ensureExternalLoadBalancerDeleted(vals.ClusterName, vals.ClusterID, svc)
+	assert.NoError(t, err)
+
+	// Assert that GCE resources are deleted. We cannot use assertExternalLbResourcesDeleted
+	// because the service itself has been deleted and cannot be fetched from the API server.
+	lbName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+	hcName := MakeNodesHealthCheckName(vals.ClusterID)
+
+	// Check that Firewalls are deleted for the LoadBalancer and the HealthCheck
+	fwNames := []string{
+		MakeFirewallName(lbName),
+		MakeHealthCheckFirewallName(vals.ClusterID, hcName, true),
+	}
+	for _, fwName := range fwNames {
+		firewall, err := gce.GetFirewall(fwName)
+		require.Error(t, err)
+		assert.Nil(t, firewall)
+	}
+
+	// Check forwarding rule is deleted
+	fwdRule, err := gce.GetRegionForwardingRule(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, fwdRule)
+
+	// Check that TargetPool is deleted
+	pool, err := gce.GetTargetPool(lbName, gce.region)
+	require.Error(t, err)
+	assert.Nil(t, pool)
+
+	// Check that HealthCheck is deleted
+	healthcheck, err := gce.GetHTTPHealthCheck(hcName)
+	require.Error(t, err)
+	assert.Nil(t, healthcheck)
+}
+
 func TestLoadBalancerWrongTierResourceDeletion(t *testing.T) {
 	t.Parallel()
 
@@ -2807,4 +2868,75 @@ func TestEnsureExternalLoadBalancerMetrics(t *testing.T) {
 	// Now verify success count is 0 (since we deleted the success service)
 	lm.exportNetLBMetrics()
 	verifyL4NetLBMetric(t, 0, StatusError, DenyFirewallStatusNone)
+}
+
+// TestEnsureExternalLoadBalancerLocalNoOpUpdate ensures that the local health check and firewall are not changed when there is no update
+// to the etp=Local service.
+func TestEnsureExternalLoadBalancerLocalNoOpUpdate(t *testing.T) {
+	t.Parallel()
+
+	vals := DefaultTestClusterValues()
+	nodeNames := []string{"test-node-1"}
+
+	gce, err := fakeGCECloud(vals)
+	require.NoError(t, err)
+
+	svc := fakeLoadbalancerService("")
+	svc.Spec.ExternalTrafficPolicy = v1.ServiceExternalTrafficPolicyTypeLocal
+	svc.Spec.HealthCheckNodePort = int32(10101)
+	svc.Spec.Type = v1.ServiceTypeLoadBalancer
+
+	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	_, err = createExternalLoadBalancer(gce, svc, nodeNames, vals.ClusterName, vals.ClusterID, vals.ZoneName)
+	assert.NoError(t, err)
+
+	loadBalancerName := gce.GetLoadBalancerName(context.TODO(), "", svc)
+
+	// Verification 1
+	// Verify that the local health check is created.
+	hc, err := gce.GetHTTPHealthCheck(loadBalancerName)
+	require.NoError(t, err)
+	assert.Equal(t, loadBalancerName, hc.Name)
+	assert.Equal(t, int64(10101), hc.Port)
+	assert.Equal(t, "/healthz", hc.RequestPath)
+
+	// Verify that the local health check firewall is created.
+	localHcSwName := MakeHealthCheckFirewallName(vals.ClusterID, loadBalancerName, false)
+	localFw, err := gce.GetFirewall(localHcSwName)
+	require.NoError(t, err)
+	assert.NotNil(t, localFw)
+
+	// Verify that the SHARED nodes health check and its firewall are NOT created.
+	sharedHcName := MakeNodesHealthCheckName(vals.ClusterID)
+	_, err = gce.GetHTTPHealthCheck(sharedHcName)
+	assert.True(t, isNotFound(err))
+
+	sharedHcSwName := MakeHealthCheckFirewallName(vals.ClusterID, sharedHcName, true)
+	_, err = gce.GetFirewall(sharedHcSwName)
+	assert.True(t, isNotFound(err))
+
+	// Call gce.ensureExternalLoadBalancer again for no-op update
+	nodes, err := createAndInsertNodes(gce, nodeNames, vals.ZoneName)
+	require.NoError(t, err)
+
+	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
+	assert.NoError(t, err)
+
+	// Verification 2
+	// Re-verify all conditions
+	hc, err = gce.GetHTTPHealthCheck(loadBalancerName)
+	require.NoError(t, err)
+	assert.Equal(t, loadBalancerName, hc.Name)
+
+	localFw, err = gce.GetFirewall(localHcSwName)
+	require.NoError(t, err)
+	assert.NotNil(t, localFw)
+
+	_, err = gce.GetHTTPHealthCheck(sharedHcName)
+	assert.True(t, isNotFound(err))
+
+	_, err = gce.GetFirewall(sharedHcSwName)
+	assert.True(t, isNotFound(err))
 }

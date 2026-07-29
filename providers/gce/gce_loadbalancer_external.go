@@ -30,6 +30,7 @@ import (
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -65,6 +66,10 @@ func (g *Cloud) ensureExternalLoadBalancer(clusterName string, clusterID string,
 	// Skip service handling if it uses Regional Backend Services and handled by other controllers
 	if !shouldProcessNetLB(apiService, existingFwdRule, g.enableRBSDefaultForL4NetLB) {
 		return nil, cloudprovider.ImplementedElsewhere
+	}
+
+	if err := g.processMixedProtocolCheck(context.TODO(), apiService, false); err != nil {
+		return nil, err
 	}
 
 	nm := types.NamespacedName{Namespace: apiService.Namespace, Name: apiService.Name}
@@ -322,6 +327,10 @@ func (g *Cloud) updateExternalLoadBalancer(clusterName string, service *v1.Servi
 		return cloudprovider.ImplementedElsewhere
 	}
 
+	if err := g.processMixedProtocolCheck(context.TODO(), service, true); err != nil {
+		return err
+	}
+
 	if err := addFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
 		klog.Errorf("Failed to attach finalizer '%s' on service %s/%s - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
 		return err
@@ -423,7 +432,11 @@ func (g *Cloud) ensureExternalLoadBalancerDeleted(clusterName, clusterID string,
 
 	klog.Infof("ensureExternalLoadBalancerDeleted(%v): Removing %q finalizer from service %s", loadBalancerName, NetLBFinalizerV1, service.Name)
 	if err := removeFinalizer(service, g.client.CoreV1(), NetLBFinalizerV1); err != nil {
-		klog.Errorf("Failed to remove finalizer '%s' from service %s - %v", NetLBFinalizerV1, service.Name, err)
+		if apierrors.IsNotFound(err) {
+			klog.Errorf("Failed to remove finalizer '%s' from service %s/%s (not found) - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
+			return nil
+		}
+		klog.Errorf("Failed to remove finalizer '%s' from service %s/%s - %v", NetLBFinalizerV1, service.Namespace, service.Name, err)
 		return err
 	}
 	g.metricsCollector.DeleteL4NetLBService(serviceName.String())
@@ -591,7 +604,7 @@ func (g *Cloud) ensureTargetPoolAndHealthCheck(tpExists, tpNeedsRecreation bool,
 				return fmt.Errorf("failed to ensure health check for %v port %d path %v: %v", loadBalancerName, hcToCreate.Port, hcToCreate.RequestPath, err)
 			}
 			// Check whether it is nodes health check, which has different name from the load-balancer.
-			isNodesHealthCheck := hcToCreate.Name != serviceName.Name
+			isNodesHealthCheck := hcToCreate.Name != loadBalancerName
 			if isNodesHealthCheck {
 				// Lock to prevent necessary nodes health check / firewall gets deleted.
 				g.sharedResourceLock.Lock()
