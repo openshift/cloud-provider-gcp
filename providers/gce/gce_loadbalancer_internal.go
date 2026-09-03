@@ -421,10 +421,6 @@ func (g *Cloud) ensureInternalLoadBalancerDeleted(clusterName, clusterID string,
 	}
 
 	deleteFunc := func(fwName string) error {
-		if g.firewallRulesManagement == firewallRulesManagementDisabled {
-			klog.V(2).Infof("ensureInternalLoadBalancerDeleted(%v): firewall rules are unmanaged", fwName)
-			return nil
-		}
 		if err := ignoreNotFound(g.DeleteFirewall(fwName)); err != nil {
 			if isForbidden(err) && g.OnXPN() {
 				klog.V(2).Infof("ensureInternalLoadBalancerDeleted(%v): could not delete traffic firewall on XPN cluster. Raising event.", loadBalancerName)
@@ -491,11 +487,6 @@ func (g *Cloud) teardownInternalBackendService(bsName string) error {
 }
 
 func (g *Cloud) teardownInternalHealthCheckAndFirewall(svc *v1.Service, hcName string, shared bool) error {
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("teardownInternalHealthCheckAndFirewall(%v): unmanaged firewall rules", hcName)
-		return nil
-	}
-
 	hcFirewallName := makeHealthCheckFirewallNameFromHC(hcName)
 	defer g.lockHealthCheck(hcName, shared)()
 	defer g.lockFirewall(hcFirewallName, shared)()
@@ -530,11 +521,6 @@ func (g *Cloud) ensureInternalFirewall(svc *v1.Service, fwName, fwDesc, destinat
 	defer g.lockFirewall(fwName, shared)()
 
 	klog.V(2).Infof("ensureInternalFirewall(%v): checking existing firewall", fwName)
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("ensureInternalFirewall(%v): firewall rules are unmanaged", fwName)
-		return nil
-	}
-
 	targetTags, err := g.GetNodeTags(nodeNames(nodes))
 	if err != nil {
 		return err
@@ -763,15 +749,8 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 		klog.Errorf("invalid subnetwork URL configured for the controller, assuming all nodes are in the default subnetwork %s, err: %v", g.SubnetworkURL(), err)
 	}
 
-	// Filter nodes that are already in existing external instance groups.
-	// Returns nodes needing internal instance groups and existing IG links to reuse.
-	filteredNodes, existingIgLinks, err := g.filterNodesWithExistingExternalInstanceGroups(name, nodes)
-	if err != nil {
-		return nil, err
-	}
-
-	zonedNodes := splitNodesByZone(filteredNodes)
-	klog.V(2).Infof("ensureInternalInstanceGroups(%v): %d filtered nodes over %d zones in region %v", name, len(filteredNodes), len(zonedNodes), g.region)
+	zonedNodes := splitNodesByZone(nodes)
+	klog.V(2).Infof("ensureInternalInstanceGroups(%v): %d nodes over %d zones in region %v", name, len(nodes), len(zonedNodes), g.region)
 
 	emptyZoneNodesNames := sets.NewString()
 	for _, n := range zonedNodes[""] {
@@ -783,8 +762,6 @@ func (g *Cloud) ensureInternalInstanceGroups(name string, nodes []*v1.Node) ([]s
 	}
 
 	var igLinks []string
-	igLinks = append(igLinks, existingIgLinks...)
-
 	for zone, nodes := range zonedNodes {
 		if zone == "" {
 			continue // skip ensuring nodes with empty zone
