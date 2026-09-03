@@ -26,6 +26,7 @@ import (
 	controllermanagerapp "k8s.io/controller-manager/app"
 	"k8s.io/controller-manager/controller"
 	"k8s.io/klog/v2"
+	netutils "k8s.io/utils/net"
 
 	"k8s.io/cloud-provider-gcp/pkg/controller/nodeipam"
 	"k8s.io/cloud-provider-gcp/pkg/controller/nodeipam/ipam"
@@ -126,14 +127,23 @@ func startGKETenantControllerManager(mgrCfg gkeTenantControllerManagerConfig) (c
 		},
 		"node-ipam-controller": func(cfg *gketenantcontrollers.ControllerConfig) error {
 			klog.Infof("Starting Node IPAM Controller for %s...", cfg.ProviderConfig.Name)
-			cidrs := getCIDRsFromProviderConfig(cfg.ProviderConfig)
+			var cidrs string
+			if isIPV6OnlyCluster(mgrCfg.nodeIPAMConfig) {
+				// MT always uses Cloud allocator, CIDRs are only needed to pass validation.
+				// IPv6-only clusters don't use pod ranges, backfill with discard prefix (RFC 6666).
+				cidrs = "100::/64"
+			} else {
+				cidrs = getCIDRsFromProviderConfig(cfg.ProviderConfig)
+			}
 
 			// Disable MultiSubnetCluster for tenant controllers to prevent them from
 			// overwriting the global "default" NodeTopology CR with tenant-specific subnets.
 			// We only enable this feature if the current controller belongs to the supervisor.
 			tenantNodeIPAMConfig := mgrCfg.nodeIPAMConfig
+			defaultNetworkName := ""
 			if !utils.IsSupervisor(cfg.ProviderConfig) {
-				tenantNodeIPAMConfig.EnableMultiSubnetCluster = false
+				defaultNetworkName = cfg.ProviderConfig.Name + "-default"
+				klog.Infof("Node IPAM Controller for %s using default network name %s", cfg.ProviderConfig.Name, defaultNetworkName)
 			}
 
 			// Wrap the informer to filter nodes
@@ -160,6 +170,7 @@ func startGKETenantControllerManager(mgrCfg gkeTenantControllerManagerConfig) (c
 				nodeTopologyClient,
 				ipam.CIDRAllocatorType(mgrCfg.completedConfig.ComponentConfig.KubeCloudShared.CIDRAllocatorType),
 				cfg.ControllerContext.ControllerManagerMetrics,
+				defaultNetworkName,
 			)
 			if err != nil {
 				return err
@@ -229,6 +240,11 @@ func startGKETenantControllerManager(mgrCfg gkeTenantControllerManagerConfig) (c
 	go mgr.Run()
 
 	return nil, starter, true, nil
+}
+
+// isIPV6OnlyCluster returns true if cluster is IPv6 single-stack (and false otherwise).
+func isIPV6OnlyCluster(ipamCfg nodeipamconfig.NodeIPAMControllerConfiguration) bool {
+	return netutils.IPFamilyOfCIDRString(ipamCfg.ServiceCIDR) == netutils.IPv6 && ipamCfg.SecondaryServiceCIDR == ""
 }
 
 // getCIDRsFromProviderConfig returns a comma-separated list of CIDRs from the given ProviderConfig.

@@ -52,7 +52,7 @@ func TestAdaptiveIpamServer_withGrpcClient(t *testing.T) {
 	}
 	defer s.Close()
 
-	server := &adaptiveIpamServer{store: s, sockPath: sockPath}
+	server := newAdaptiveIpamServer(logger, s, sockPath, 0, 0)
 
 	// 1. Start server in background
 	errCh := make(chan error, 1)
@@ -67,7 +67,8 @@ func TestAdaptiveIpamServer_withGrpcClient(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, sockPath, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
+	conn, err := grpc.NewClient("unix://"+sockPath, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithContextDialer(func(_ context.Context, addr string) (net.Conn, error) {
+		addr = strings.TrimPrefix(addr, "unix://")
 		return net.Dial("unix", addr)
 	}))
 	if err != nil {
@@ -228,24 +229,24 @@ func TestAdaptiveIpamServer_AllocatePodIP_Concurrency(t *testing.T) {
 		}
 	}
 
-	uniqueIpMap := make(map[string]bool)
+	uniqueIPMap := map[string]bool{}
 	for _, ip := range ips {
 		if ip != "" {
-			uniqueIpMap[ip] = true
+			uniqueIPMap[ip] = true
 		}
 	}
-	if len(uniqueIpMap) != numGoroutines/2 {
-		t.Errorf("Expected %d unique IPv4s, got %d (ips: %v)", numGoroutines/2, len(uniqueIpMap), ips)
+	if len(uniqueIPMap) != numGoroutines/2 {
+		t.Errorf("Expected %d unique IPv4s, got %d (ips: %v)", numGoroutines/2, len(uniqueIPMap), ips)
 	}
 
-	uniqueIpMap6 := make(map[string]bool)
+	uniqueIPMap6 := map[string]bool{}
 	for _, ip := range ips6 {
 		if ip != "" {
-			uniqueIpMap6[ip] = true
+			uniqueIPMap6[ip] = true
 		}
 	}
-	if len(uniqueIpMap6) != numGoroutines/2 {
-		t.Errorf("Expected %d unique IPv6s, got %d (ips6: %v)", numGoroutines/2, len(uniqueIpMap6), ips6)
+	if len(uniqueIPMap6) != numGoroutines/2 {
+		t.Errorf("Expected %d unique IPv6s, got %d (ips6: %v)", numGoroutines/2, len(uniqueIPMap6), ips6)
 	}
 }
 
@@ -441,7 +442,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_IPv6(t *testing.T) {
 	}
 	defer storeInstance.Close()
 
-	server := &adaptiveIpamServer{store: storeInstance}
+	server := newAdaptiveIpamServer(logger, storeInstance, "", 0, 0)
 
 	network := "test-network"
 	cidr := "2001:db8::/64"
@@ -488,7 +489,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_IPv6_Idempotency_Release(t *testing.T)
 	}
 	defer storeInstance.Close()
 
-	server := &adaptiveIpamServer{store: storeInstance}
+	server := newAdaptiveIpamServer(logger, storeInstance, "", 0, 0)
 
 	network := "test-network"
 	cidr := "2001:db8::/64"
@@ -561,7 +562,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_DualStack(t *testing.T) {
 	}
 	defer storeInstance.Close()
 
-	server := &adaptiveIpamServer{store: storeInstance}
+	server := newAdaptiveIpamServer(logger, storeInstance, "", 0, 0)
 
 	network := "test-network"
 	cidr4 := "10.0.1.0/24"
@@ -584,6 +585,9 @@ func TestAdaptiveIpamServer_AllocatePodIP_DualStack(t *testing.T) {
 	}
 
 	resp, err := server.AllocatePodIP(context.Background(), req)
+	if err != nil {
+		t.Fatalf("AllocatePodIP failed: %v", err)
+	}
 	if resp.Ipv4 == nil || resp.Ipv4.IpAddress == "" {
 		t.Fatal("Expected IPv4 allocation, got nil or empty")
 	}
@@ -635,7 +639,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_DynamicAllocation(t *testing.T) {
 		{
 			name:      "Context Cancelled Path",
 			cancelCtx: true,
-			action: func(ctx context.Context, server *adaptiveIpamServer, storeInstance *store.Store, network string) error {
+			action: func(_ context.Context, _ *adaptiveIpamServer, _ *store.Store, _ string) error {
 				return nil
 			},
 			wantErr:      true,
@@ -674,7 +678,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_DynamicAllocation(t *testing.T) {
 				NodeName:        nodeName,
 				MonitorInterval: 1 * time.Second,
 			})
-			server.monitor = monitorInstance
+			server.engine.SetMonitor(monitorInstance)
 
 			network := "test-network"
 			req := &adaptiveipam.AllocatePodIPRequest{
@@ -711,9 +715,9 @@ func TestAdaptiveIpamServer_AllocatePodIP_DynamicAllocation(t *testing.T) {
 			time.Sleep(100 * time.Millisecond)
 
 			// Verify that there is a pending request in map
-			server.requestsMu.RLock()
-			mapLen := len(server.requestsMap[network])
-			server.requestsMu.RUnlock()
+			server.engine.requestsMu.RLock()
+			mapLen := len(server.engine.requestsMap[network])
+			server.engine.requestsMu.RUnlock()
 			if mapLen != 1 {
 				t.Errorf("Expected 1 pending request in requestsMap for network %s, got %d", network, mapLen)
 			}
@@ -747,9 +751,9 @@ func TestAdaptiveIpamServer_AllocatePodIP_DynamicAllocation(t *testing.T) {
 			}
 
 			// Verify requestsMap is empty
-			server.requestsMu.RLock()
-			finalMapLen := len(server.requestsMap)
-			server.requestsMu.RUnlock()
+			server.engine.requestsMu.RLock()
+			finalMapLen := len(server.engine.requestsMap)
+			server.engine.requestsMu.RUnlock()
 			if finalMapLen != 0 {
 				t.Errorf("Expected requestsMap to be empty (0 entries), but got %d entries", finalMapLen)
 			}
@@ -783,7 +787,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_DynamicAllocation_MultipleRequests(t *
 		NodeName:        nodeName,
 		MonitorInterval: 1 * time.Second,
 	})
-	server.monitor = monitorInstance
+	server.engine.SetMonitor(monitorInstance)
 
 	network := "test-network"
 	numRequests := 10
@@ -862,7 +866,7 @@ func TestAdaptiveIpamServer_CheckPodIP(t *testing.T) {
 	}
 	defer s.Close()
 
-	server := &adaptiveIpamServer{store: s}
+	server := newAdaptiveIpamServer(logger, s, "", 0, 0)
 
 	network := "test-network"
 	cidr := "10.0.1.0/24"
@@ -922,7 +926,7 @@ func TestAdaptiveIpamServer_CheckPodIP(t *testing.T) {
 }
 
 func TestAdaptiveIpamServer_AllocatePodIP_Validation(t *testing.T) {
-	server := &adaptiveIpamServer{}
+	server := newAdaptiveIpamServer(klog.Background(), nil, "", 0, 0)
 
 	tests := []struct {
 		name          string
@@ -976,7 +980,7 @@ func TestAdaptiveIpamServer_AllocatePodIP_Validation(t *testing.T) {
 }
 
 func TestAdaptiveIpamServer_DeallocatePodIP_Validation(t *testing.T) {
-	server := &adaptiveIpamServer{}
+	server := newAdaptiveIpamServer(klog.Background(), nil, "", 0, 0)
 
 	tests := []struct {
 		name          string
