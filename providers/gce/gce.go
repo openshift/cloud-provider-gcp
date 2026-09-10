@@ -46,6 +46,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -118,17 +119,6 @@ const clusterStackIPV4 StackType = "IPV4"
 // clusterStackIPV6 represents a cluster in which Pods and Services are addressable with IPv6 addresses.
 // The underlying VPC's stack type could be either IPV6 or dual stack IPV4_IPV6.
 const clusterStackIPV6 StackType = "IPV6"
-
-// FirewallRulesManagement indicates how firewall rules are managed by the provider.
-type FirewallRulesManagement string
-
-// firewallRulesManagementEnabled indicates that the firewall rules should be managed by the provider.
-// This includes firewall rule creation, deletion, and updates.
-const firewallRulesManagementEnabled FirewallRulesManagement = "Enabled"
-
-// firewallRulesManagementDisabled indicates that the firewall rules should not be managed by the provider.
-// This includes firewall rule creation, deletion, and updates.
-const firewallRulesManagementDisabled FirewallRulesManagement = "Disabled"
 
 // Cloud is an implementation of Interface, LoadBalancer and Instances for Google Compute Engine.
 type Cloud struct {
@@ -227,32 +217,21 @@ type Cloud struct {
 	// Enable this ony when the Node's .spec.providerID can be fully trusted.
 	projectFromNodeProviderID bool
 
-	// enableDiscretePortForwarding enables forwarding of individual ports
-	// instead of port ranges in Forwarding Rules for external load balancers.
-	enableDiscretePortForwarding bool
-
-	// externalInstanceGroupsPrefix if set, finds instance groups with
-	// the provided prefix and considers them for ILB backends.
-	externalInstanceGroupsPrefix string
-
 	// enableRBSDefaultForL4NetLB disable Service controller from picking up services by default
 	enableRBSDefaultForL4NetLB bool
 
-	// enableL4LBAnnotations enables adding resource annotations to L4 load balancer services.
+	// enableL4LBAnnotations enable annotations related to provisioned resources in GCE
 	enableL4LBAnnotations bool
 
-	// enableL4DenyFirewallRule enables creation of a deny firewall rule for L4 load balancers.
+	// enableL4DenyFirewallRule creates an additional deny firewall rule at priority 1000
+	// and moves the allow rule to priority 999 to improve security posture.
 	enableL4DenyFirewallRule bool
 
-	// enableL4DenyFirewallRollbackCleanup enables cleanup of deny firewall rules when the feature is rolled back.
+	// enableL4DenyFirewallRollbackCleanup
 	enableL4DenyFirewallRollbackCleanup bool
 
 	// enableL4ILBFineGrainedLocks enables fine-grained resource-specific locking
 	enableL4ILBFineGrainedLocks bool
-
-	// FirewallRulesManagement indicates whether the provider should handle all firewall
-	// operations, such as creation, deletion, and updates.
-	firewallRulesManagement FirewallRulesManagement
 }
 
 type SharedResourceType string
@@ -348,14 +327,6 @@ type ConfigGlobal struct {
 	// Default to none.
 	// For example: MyFeatureFlag
 	AlphaFeatures []string `gcfg:"alpha-features"`
-
-	// ExternalInstanceGroupsPrefix, when not-empty, is used to filter instance groups (from an external GCP Project)
-	// and include them in the backend for ILB.
-	ExternalInstanceGroupsPrefix string `gcfg:"external-instance-groups-prefix"`
-
-	// FirewallRulesManagement indicates whether the provider should handle all firewall
-	// operations, such as creation, deletion, and updates.
-	FirewallRulesManagement string `gcfg:"firewall-rules-management"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -383,15 +354,13 @@ type CloudConfig struct {
 	SubnetworkName       string
 	SubnetworkURL        string
 	// DEPRECATED: Do not rely on this value as it may be incorrect.
-	SecondaryRangeName           string
-	NodeTags                     []string
-	NodeInstancePrefix           string
-	TokenSource                  oauth2.TokenSource
-	UseMetadataServer            bool
-	AlphaFeatureGate             *AlphaFeatureGate
-	StackType                    string
-	ExternalInstanceGroupsPrefix string
-	FirewallRulesManagement      string
+	SecondaryRangeName string
+	NodeTags           []string
+	NodeInstancePrefix string
+	TokenSource        oauth2.TokenSource
+	UseMetadataServer  bool
+	AlphaFeatureGate   *AlphaFeatureGate
+	StackType          string
 }
 
 func init() {
@@ -483,8 +452,6 @@ func GenerateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 		cloudConfig.NodeTags = configFile.Global.NodeTags
 		cloudConfig.NodeInstancePrefix = configFile.Global.NodeInstancePrefix
 		cloudConfig.AlphaFeatureGate = NewAlphaFeatureGate(configFile.Global.AlphaFeatures)
-		cloudConfig.ExternalInstanceGroupsPrefix = configFile.Global.ExternalInstanceGroupsPrefix
-		cloudConfig.FirewallRulesManagement = configFile.Global.FirewallRulesManagement
 	}
 
 	// retrieve projectID and zone
@@ -699,33 +666,31 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 	operationPollRateLimiter := flowcontrol.NewTokenBucketRateLimiter(5, 5) // 5 qps, 5 burst.
 
 	gce := &Cloud{
-		service:                      service,
-		serviceAlpha:                 serviceAlpha,
-		serviceBeta:                  serviceBeta,
-		containerService:             containerService,
-		tpuService:                   tpuService,
-		projectID:                    projID,
-		networkProjectID:             netProjID,
-		onXPN:                        onXPN,
-		region:                       config.Region,
-		regional:                     config.Regional,
-		localZone:                    config.Zone,
-		dynamicZones:                 dynamicZones,
-		networkURL:                   networkURL,
-		unsafeIsLegacyNetwork:        isLegacyNetwork,
-		unsafeSubnetworkURL:          subnetURL,
-		secondaryRangeName:           config.SecondaryRangeName,
-		nodeTags:                     config.NodeTags,
-		nodeInstancePrefix:           config.NodeInstancePrefix,
-		useMetadataServer:            config.UseMetadataServer,
-		operationPollRateLimiter:     operationPollRateLimiter,
-		AlphaFeatureGate:             config.AlphaFeatureGate,
-		nodeZones:                    map[string]sets.String{},
-		metricsCollector:             newLoadBalancerMetrics(),
-		projectsBasePath:             getProjectsBasePath(service.BasePath),
-		stackType:                    StackType(config.StackType),
-		externalInstanceGroupsPrefix: config.ExternalInstanceGroupsPrefix,
-		firewallRulesManagement:      FirewallRulesManagement(config.FirewallRulesManagement),
+		service:                  service,
+		serviceAlpha:             serviceAlpha,
+		serviceBeta:              serviceBeta,
+		containerService:         containerService,
+		tpuService:               tpuService,
+		projectID:                projID,
+		networkProjectID:         netProjID,
+		onXPN:                    onXPN,
+		region:                   config.Region,
+		regional:                 config.Regional,
+		localZone:                config.Zone,
+		dynamicZones:             dynamicZones,
+		networkURL:               networkURL,
+		unsafeIsLegacyNetwork:    isLegacyNetwork,
+		unsafeSubnetworkURL:      subnetURL,
+		secondaryRangeName:       config.SecondaryRangeName,
+		nodeTags:                 config.NodeTags,
+		nodeInstancePrefix:       config.NodeInstancePrefix,
+		useMetadataServer:        config.UseMetadataServer,
+		operationPollRateLimiter: operationPollRateLimiter,
+		AlphaFeatureGate:         config.AlphaFeatureGate,
+		nodeZones:                map[string]sets.String{},
+		metricsCollector:         newLoadBalancerMetrics(),
+		projectsBasePath:         getProjectsBasePath(service.BasePath),
+		stackType:                StackType(config.StackType),
 	}
 
 	gce.manager = &gceServiceManager{gce}
@@ -860,6 +825,9 @@ func (g *Cloud) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, 
 
 	go g.watchClusterID(stop)
 	go g.metricsCollector.Run(stop)
+	if g.dynamicZones {
+		go g.syncManagedZonesPeriodically(stop)
+	}
 }
 
 // LoadBalancer returns an implementation of LoadBalancer for Google Compute Engine.
@@ -1206,4 +1174,12 @@ func (g *Cloud) refreshManagedZones() error {
 	}
 
 	return nil
+}
+
+func (g *Cloud) syncManagedZonesPeriodically(stop <-chan struct{}) {
+	wait.Until(func() {
+		if err := g.refreshManagedZones(); err != nil {
+			klog.Errorf("Periodic refresh of GCE managed zones failed: %v", err)
+		}
+	}, 5*time.Minute, stop)
 }
