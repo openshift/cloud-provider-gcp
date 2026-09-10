@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"net"
 	"reflect"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -42,6 +43,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/cloud-provider-gcp/pkg/controllermetrics"
 	utilnode "k8s.io/cloud-provider-gcp/pkg/util/node"
@@ -49,7 +51,6 @@ import (
 	controllersmetrics "k8s.io/component-base/metrics/prometheus/controllers"
 	"k8s.io/klog/v2"
 	netutils "k8s.io/utils/net"
-	"k8s.io/utils/strings/slices"
 )
 
 const (
@@ -64,6 +65,7 @@ const (
 	componentName             = "cloud-controller-manager"
 	ensureExistsMode          = "EnsureExists"
 	reconcileMode             = "Reconcile"
+	ProviderConfigLabelKey    = "tenancy.gke.io/provider-config"
 )
 
 // Controller manages GKENetworkParamSet status.
@@ -78,6 +80,8 @@ type Controller struct {
 	nodeLister                corelisters.NodeLister
 	nodeInformerSynced        cache.InformerSynced
 	clusterDefaultIPv4PodCIDR string
+	defaultGNPName            string
+	isIPv6OnlyCluster         bool
 }
 
 // NewGKENetworkParamSetController returns a new
@@ -89,10 +93,15 @@ func NewGKENetworkParamSetController(
 	gceCloud *gce.Cloud,
 	networkInformerFactory networkinformers.SharedInformerFactory,
 	clusterCIDRs []*net.IPNet,
+	defaultGNPName string,
 ) *Controller {
 
 	// register GNP metrics
 	registerGKENetworkParamSetMetrics()
+
+	if defaultGNPName == "" {
+		defaultGNPName = networkv1.DefaultPodNetworkName
+	}
 
 	c := &Controller{
 		networkClientset:         networkClientset,
@@ -103,6 +112,7 @@ func NewGKENetworkParamSetController(
 		networkInformerFactory:   networkInformerFactory,
 		nodeLister:               nodeInformer.Lister(),
 		nodeInformerSynced:       nodeInformer.Informer().HasSynced,
+		defaultGNPName:           defaultGNPName,
 	}
 
 	gkeNetworkParamsInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -167,13 +177,13 @@ func NewGKENetworkParamSetController(
 		AddFunc: func(obj interface{}) {
 			node := obj.(*v1.Node)
 			if c.nonDefaultParamsPodRanges(node) {
-				c.queue.Add(networkv1.DefaultPodNetworkName)
+				c.queue.Add(c.defaultGNPName)
 			}
 		},
 		DeleteFunc: func(obj interface{}) {
 			node := obj.(*v1.Node)
 			if v, ok := node.Labels[utilnode.NodePoolPodRangeLabelPrefix]; ok && v != "" {
-				c.queue.Add(networkv1.DefaultPodNetworkName)
+				c.queue.Add(c.defaultGNPName)
 			}
 		},
 	})
@@ -183,7 +193,11 @@ func NewGKENetworkParamSetController(
 			c.clusterDefaultIPv4PodCIDR = clusterCIDR.String()
 		}
 	}
-	if c.clusterDefaultIPv4PodCIDR == "" {
+
+	// cluster is IPv6-only if it doesn't have any IPv4 cluster CIDRs.
+	c.isIPv6OnlyCluster = c.clusterDefaultIPv4PodCIDR == ""
+
+	if len(clusterCIDRs) == 0 {
 		klog.Fatal("Controller: Must specify --cluster-cidr for GKE VPC native cluster")
 	}
 
@@ -301,7 +315,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 	params := originalParams.DeepCopy()
 
 	// always re-create "default" paramset to ensure the valid vpc, subnet and cluster-default pod range
-	if params.Name == networkv1.DefaultPodNetworkName {
+	if params.DeletionTimestamp == nil && params.Name == c.defaultGNPName {
 		// should make sure the addon manager is not on reconcile mode
 		if v := params.Labels[labelsAddonManagerMode]; v != reconcileMode {
 			if err = c.populateDesiredDefaultParamSet(ctx, params); err != nil {
@@ -314,7 +328,7 @@ func (c *Controller) reconcile(ctx context.Context, key string) error {
 
 	// if the "default" paramset updates PodIPv4Range, marks the default Network not ready.
 	// This will trigger NCM to update Network routes.
-	if params.Name == networkv1.DefaultPodNetworkName && !samePodIPv4Ranges(params, originalParams) {
+	if params.Name == c.defaultGNPName && !samePodIPv4Ranges(params, originalParams) {
 		err = c.updateNetworkConditionForPodRanges(ctx, params)
 	}
 
@@ -365,17 +379,26 @@ func (c *Controller) populateDesiredDefaultParamSet(ctx context.Context, params 
 		return fmt.Errorf("failed to get vpcSubnet %q compute subnetwork: %v, err: %v", vpcSubnet, subnet, err)
 	}
 	defaultPodRange := ""
-	for _, r := range subnet.SecondaryIpRanges {
-		if r.IpCidrRange == c.clusterDefaultIPv4PodCIDR {
-			defaultPodRange = r.RangeName
-			break
+	// if cluster is ipv6 only, then defaultPodRange should be empty
+	if !c.isIPv6OnlyCluster {
+		for _, r := range subnet.SecondaryIpRanges {
+			if r.IpCidrRange == c.clusterDefaultIPv4PodCIDR {
+				defaultPodRange = r.RangeName
+				break
+			}
 		}
-	}
-	if defaultPodRange == "" {
-		return fmt.Errorf("failed to find range name for cluster default IPv4 Pod CIDR %q in compute subnet: %q", c.clusterDefaultIPv4PodCIDR, subnet.Name)
+		if defaultPodRange == "" {
+			return fmt.Errorf("failed to find range name for cluster default IPv4 Pod CIDR %q in compute subnet: %q", c.clusterDefaultIPv4PodCIDR, subnet.Name)
+		}
 	}
 
 	// ensure Annotations and Labels
+	if params.Annotations == nil {
+		params.Annotations = make(map[string]string)
+	}
+	if params.Labels == nil {
+		params.Labels = make(map[string]string)
+	}
 	if v, ok := params.Annotations[annotationComponentsLayer]; !ok || v != componentLayer {
 		params.Annotations[annotationComponentsLayer] = componentLayer
 	}
@@ -390,9 +413,11 @@ func (c *Controller) populateDesiredDefaultParamSet(ctx context.Context, params 
 	params.Spec = networkv1.GKENetworkParamSetSpec{
 		VPC:       vpc,
 		VPCSubnet: vpcSubnet,
-		PodIPv4Ranges: &networkv1.SecondaryRanges{
+	}
+	if defaultPodRange != "" {
+		params.Spec.PodIPv4Ranges = &networkv1.SecondaryRanges{
 			RangeNames: []string{defaultPodRange},
-		},
+		}
 	}
 	return nil
 }
@@ -423,7 +448,7 @@ func (c *Controller) syncGNP(ctx context.Context, params *networkv1.GKENetworkPa
 			return nil
 		}
 
-		return c.getAndSyncNetworkForGNP(ctx, params)
+		return c.getAndSyncNetworkForGNP(ctx, params, nil)
 	}
 
 	// Validate params with (VPC + VPCSubnet).
@@ -444,7 +469,7 @@ func (c *Controller) syncGNP(ctx context.Context, params *networkv1.GKENetworkPa
 
 	// update PodIPv4Ranges for the "default" paramset basing on all the nodes Pod ranges
 	// when the paramset is EnsureExists mode
-	if params.Name == networkv1.DefaultPodNetworkName {
+	if params.Name == c.defaultGNPName && params.Spec.PodIPv4Ranges != nil {
 		if mode, ok := params.Labels[labelsAddonManagerMode]; ok && mode == ensureExistsMode {
 			if err = c.syncPodRanges(ctx, params); err != nil {
 				return err
@@ -452,18 +477,18 @@ func (c *Controller) syncGNP(ctx context.Context, params *networkv1.GKENetworkPa
 		}
 	}
 
-	cidrs := extractRelevantCidrs(subnet, params)
+	cidrs := extractRelevantCidrs(subnet, params, c.isIPv6OnlyCluster, c.defaultGNPName)
 	params.Status.PodCIDRs = &networkv1.NetworkRanges{
 		CIDRBlocks: cidrs,
 	}
 
-	return c.getAndSyncNetworkForGNP(ctx, params)
+	return c.getAndSyncNetworkForGNP(ctx, params, subnet)
 }
 
 // getAndSyncNetworkForGNP gets the network that refers to this GNP object, and
 // then does the cross sync of Network with GNP. GNP is guaranteed to have
 // minimum fields set (either NetworkAttachment or [VPC + VPCSubnet]).
-func (c *Controller) getAndSyncNetworkForGNP(ctx context.Context, params *networkv1.GKENetworkParamSet) error {
+func (c *Controller) getAndSyncNetworkForGNP(ctx context.Context, params *networkv1.GKENetworkParamSet, subnet *compute.Subnetwork) error {
 	network, err := c.getNetworkReferringToGNP(params.Name)
 	if err != nil {
 		return err
@@ -472,7 +497,7 @@ func (c *Controller) getAndSyncNetworkForGNP(ctx context.Context, params *networ
 		return nil
 	}
 
-	if err = c.syncNetworkWithGNP(ctx, network, params); err != nil {
+	if err = c.syncNetworkWithGNP(ctx, network, params, subnet); err != nil {
 		return err
 	}
 	return nil
@@ -495,11 +520,11 @@ func (c *Controller) getNetworkReferringToGNP(gnpName string) (*networkv1.Networ
 
 // syncNetworkWithGNP does the cross sync of Network with GNP.
 // GNP can be mutated, while a copy of Network is both transformed AND updated in the cluster
-func (c *Controller) syncNetworkWithGNP(ctx context.Context, network *networkv1.Network, params *networkv1.GKENetworkParamSet) error {
+func (c *Controller) syncNetworkWithGNP(ctx context.Context, network *networkv1.Network, params *networkv1.GKENetworkParamSet, subnet *compute.Subnetwork) error {
 	newNetwork := network.DeepCopy()
 
 	// update the copy of old Network with new conditions to be new Network basing on the change of the GNP
-	networkCrossValidation := crossValidateNetworkAndGnp(newNetwork, params)
+	networkCrossValidation := crossValidateNetworkAndGnp(newNetwork, params, c.isIPv6OnlyCluster, c.defaultGNPName, subnet)
 	meta.SetStatusCondition(&newNetwork.Status.Conditions, networkCrossValidation.toCondition())
 
 	if !reflect.DeepEqual(newNetwork.Status.Conditions, network.Status.Conditions) {
@@ -569,24 +594,39 @@ func (c *Controller) cleanupGNPDeletion(ctx context.Context, gnpName string) err
 	return nil
 }
 
-// extractRelevantCidrs returns the CIDRS of the named ranges in paramset
-func extractRelevantCidrs(subnet *compute.Subnetwork, paramset *networkv1.GKENetworkParamSet) []string {
+// extractRelevantCidrs returns the appropriate IPv4 and IPv6 CIDR blocks from the subnet based on the paramset configuration (including primary, secondary, and IPv6 prefixes)
+func extractRelevantCidrs(subnet *compute.Subnetwork, paramset *networkv1.GKENetworkParamSet, isIPv6OnlyCluster bool, defaultGNPName string) []string {
 	cidrs := []string{}
 
-	// use the subnet cidr if there are no secondary ranges specified by user in params, this can only happen if the GNP is using deviceMode
-	if !hasRangeNames(paramset) {
-		cidrs = append(cidrs, subnet.IpCidrRange)
-		return cidrs
-	}
-
-	// get secondary ranges' corresponding cidrs
-	for _, sr := range subnet.SecondaryIpRanges {
-		if !paramSetIncludesRange(paramset, sr.RangeName) {
-			continue
+	isDefaultGNP := paramset.Name == defaultGNPName
+	canHaveIpv6OnlyNetworksOnly := isIPv6OnlyCluster && isDefaultGNP
+	if !canHaveIpv6OnlyNetworksOnly {
+		if hasRangeNames(paramset) {
+			// get secondary ranges' corresponding cidrs
+			for _, sr := range subnet.SecondaryIpRanges {
+				if paramSetIncludesRange(paramset, sr.RangeName) {
+					cidrs = append(cidrs, sr.IpCidrRange)
+				}
+			}
+		} else {
+			// use the subnet cidr if there are no secondary ranges specified by user in params,
+			// this can only happen if the GNP is using deviceMode.
+			if subnet.IpCidrRange != "" {
+				cidrs = append(cidrs, subnet.IpCidrRange)
+			}
 		}
-
-		cidrs = append(cidrs, sr.IpCidrRange)
 	}
+
+	// add IPv6 ranges if present
+	if subnet.InternalIpv6Prefix != "" {
+		cidrs = append(cidrs, subnet.InternalIpv6Prefix)
+	} else if subnet.ExternalIpv6Prefix != "" {
+		cidrs = append(cidrs, subnet.ExternalIpv6Prefix)
+	} else if subnet.Ipv6CidrRange != "" {
+		// legacy subnet case
+		cidrs = append(cidrs, subnet.Ipv6CidrRange)
+	}
+
 	return cidrs
 }
 
@@ -659,4 +699,42 @@ func (c *Controller) updateNetworkConditionForPodRanges(ctx context.Context, par
 		return err
 	}
 	return nil
+}
+
+// RemoveTenantParamSetFinalizers removes the GNP finalizer from all GKENetworkParamSet resources managed by this controller instance.
+// It removes the GNP finalizer to ensure clean tenant teardown.
+func (c *Controller) RemoveTenantParamSetFinalizers(ctx context.Context, tenantName string) error {
+	if tenantName == "" || tenantName == networkv1.DefaultPodNetworkName {
+		return fmt.Errorf("invalid tenant name for deletion: %q", tenantName)
+	}
+	gnps, err := c.networkClientset.NetworkingV1().GKENetworkParamSets().List(ctx, metav1.ListOptions{
+		LabelSelector: fmt.Sprintf("%s=%s", ProviderConfigLabelKey, tenantName),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to list tenant GNPs for cleanup: %w", err)
+	}
+	var errs error
+	for _, gnp := range gnps.Items {
+		if slices.Contains(gnp.Finalizers, GNPFinalizer) {
+			klog.Infof("Removing finalizer from tenant GKENetworkParamSet %s", gnp.Name)
+			err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+				latest, err := c.networkClientset.NetworkingV1().GKENetworkParamSets().Get(ctx, gnp.Name, metav1.GetOptions{})
+				if err != nil {
+					return err
+				}
+				if !slices.Contains(latest.Finalizers, GNPFinalizer) {
+					return nil
+				}
+				gnpCopy := latest.DeepCopy()
+				removeFinalizerInPlace(gnpCopy)
+				_, err = c.networkClientset.NetworkingV1().GKENetworkParamSets().Update(ctx, gnpCopy, metav1.UpdateOptions{})
+				return err
+			})
+			if err != nil && !errors.IsNotFound(err) {
+				klog.Errorf("Failed to remove finalizer from GNP %s: %v", gnp.Name, err)
+				errs = multierror.Append(errs, err)
+			}
+		}
+	}
+	return errs
 }
