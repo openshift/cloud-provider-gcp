@@ -118,7 +118,7 @@ func NewStore(ctx context.Context, log logr.Logger, dbPath string) (*Store, erro
 
 	// Only a single process enters this execution block at a time.
 	if err := store.initSchema(ctx); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
@@ -253,7 +253,7 @@ func (s *Store) AddCIDR(ctx context.Context, network, cidr string) error {
 
 	// 1. Insert into cidr_blocks
 	res, err := tx.ExecContext(ctx, `
-		INSERT INTO cidr_blocks (cidr, network, ip_family, total_ips, allocated_ips, state) 
+		INSERT INTO cidr_blocks (cidr, network, ip_family, total_ips, allocated_ips, state)
 		VALUES (?, ?, ?, ?, 0, 'Ready')
 	`, cidr, network, ipFamily, totalIPs)
 
@@ -300,7 +300,7 @@ func (s *Store) AddCIDR(ctx context.Context, network, cidr string) error {
 		// Insert IP addresses and determine allocation status
 		var allocatedCount int
 		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name) 
+			INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name)
 			VALUES (?, ?, ?, '', '')
 		`)
 		if err != nil {
@@ -343,7 +343,7 @@ func (s *Store) AddCIDR(ctx context.Context, network, cidr string) error {
 		}
 
 		stmt, err := tx.PrepareContext(ctx, `
-			INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name) 
+			INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name)
 			VALUES (?, ?, FALSE, '', '')
 		`)
 		if err != nil {
@@ -368,14 +368,14 @@ func (s *Store) AddCIDR(ctx context.Context, network, cidr string) error {
 }
 
 // ReleaseIPByOwner updates all IP addresses matching the network, container id and interface name to be is_allocated = FALSE, and sets release_at timestamp to be now + releaseCooldown. It also decrements allocated_ips count in cidr_blocks.
-func (s *Store) ReleaseIPByOwner(ctx context.Context, network, containerID, interfaceName string, releaseCooldown time.Duration) (int, error) {
+func (s *Store) ReleaseIPByOwner(ctx context.Context, network, containerID, interfaceName string, releaseCooldown time.Duration) ([]string, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
 	defer tx.Rollback()
 
-	var releaseAt interface{}
+	var releaseAt any
 	if releaseCooldown > 0 {
 		releaseAt = time.Now().UTC().Add(releaseCooldown).UnixMilli()
 	} else {
@@ -383,59 +383,62 @@ func (s *Store) ReleaseIPByOwner(ctx context.Context, network, containerID, inte
 	}
 
 	rows, err := tx.QueryContext(ctx, `
-		SELECT i.id, i.cidr_block_id 
-		FROM ip_addresses i 
-		JOIN cidr_blocks c ON i.cidr_block_id = c.id 
+		SELECT i.id, i.cidr_block_id, i.address
+		FROM ip_addresses i
+		JOIN cidr_blocks c ON i.cidr_block_id = c.id
 		WHERE c.network = ? AND i.container_id = ? AND i.interface_name = ? AND i.is_allocated = TRUE
 	`, network, containerID, interfaceName)
 
 	if err != nil {
-		return 0, fmt.Errorf("failed to query matching IP owners: %w", err)
+		return nil, fmt.Errorf("failed to query matching IP owners: %w", err)
 	}
 	defer rows.Close()
 
 	type release struct {
 		id          int64
 		cidrBlockID int64
+		address     string
 	}
 	var releases []release
 
 	for rows.Next() {
 		var r release
-		if err := rows.Scan(&r.id, &r.cidrBlockID); err != nil {
-			return 0, fmt.Errorf("failed to scan affected IP details: %w", err)
+		if err := rows.Scan(&r.id, &r.cidrBlockID, &r.address); err != nil {
+			return nil, fmt.Errorf("failed to scan affected IP details: %w", err)
 		}
 		releases = append(releases, r)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, fmt.Errorf("failed to iterate rows: %w", err)
+		return nil, fmt.Errorf("failed to iterate rows: %w", err)
 	}
 
+	var releasedIPs []string
 	for _, r := range releases {
 		_, err = tx.ExecContext(ctx, `
-			UPDATE ip_addresses 
-			SET is_allocated = FALSE, release_at = ? 
+			UPDATE ip_addresses
+			SET is_allocated = FALSE, release_at = ?
 			WHERE id = ?
 		`, releaseAt, r.id)
 		if err != nil {
-			return 0, fmt.Errorf("failed to release IP %d: %w", r.id, err)
+			return nil, fmt.Errorf("failed to release IP %d: %w", r.id, err)
 		}
 
 		_, err = tx.ExecContext(ctx, `
-			UPDATE cidr_blocks 
-			SET allocated_ips = allocated_ips - 1 
+			UPDATE cidr_blocks
+			SET allocated_ips = allocated_ips - 1
 			WHERE id = ?
 		`, r.cidrBlockID)
 		if err != nil {
-			return 0, fmt.Errorf("failed to update cidr_block %d count: %w", r.cidrBlockID, err)
+			return nil, fmt.Errorf("failed to update cidr_block %d count: %w", r.cidrBlockID, err)
 		}
+		releasedIPs = append(releasedIPs, r.address)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit release transaction: %w", err)
+		return nil, fmt.Errorf("failed to commit release transaction: %w", err)
 	}
 
-	return len(releases), nil
+	return releasedIPs, nil
 }
 
 // CIDRBlock holds the metadata for a CIDR block.
@@ -498,11 +501,11 @@ func (s *Store) DrainCIDRBlock(ctx context.Context, id int64) error {
 func (s *Store) UndrainOneCIDRBlock(ctx context.Context, network string, ipFamily IPFamily) (bool, error) {
 	nowMilli := time.Now().UTC().UnixMilli()
 	res, err := s.db.ExecContext(ctx, `
-		UPDATE cidr_blocks 
-		SET state = ?, updated_at = ? 
+		UPDATE cidr_blocks
+		SET state = ?, updated_at = ?
 		WHERE id = (
-			SELECT id FROM cidr_blocks 
-			WHERE network = ? AND ip_family = ? AND state = ? 
+			SELECT id FROM cidr_blocks
+			WHERE network = ? AND ip_family = ? AND state = ?
 			LIMIT 1
 		)
 	`, StateReady, nowMilli, network, ipFamily, StateDraining)
@@ -522,8 +525,8 @@ func (s *Store) ExpireDrainingCIDRBlocks(ctx context.Context, network string, ip
 	nowMilli := time.Now().UTC().UnixMilli()
 
 	rows, err := s.db.QueryContext(ctx, `
-		UPDATE cidr_blocks 
-		SET state = ?, updated_at = ? 
+		UPDATE cidr_blocks
+		SET state = ?, updated_at = ?
 		WHERE network = ? AND ip_family = ? AND state = ? AND allocated_ips = 0 AND updated_at + ? <= ?
 		RETURNING id, total_ips, cidr
 	`, StateDeleting, nowMilli, network, ipFamily, StateDraining, expMs, nowMilli)
@@ -554,7 +557,7 @@ func (s *Store) allocateIPTx(ctx context.Context, tx *sql.Tx, cidrBlockID int64,
 	// 1. Fetch CIDR range for the given ID and verify it is not full
 	var cidrRange string
 	err := tx.QueryRowContext(ctx, `
-		SELECT cidr FROM cidr_blocks 
+		SELECT cidr FROM cidr_blocks
 		WHERE id = ? AND total_ips > allocated_ips AND state = 'Ready'
 	`, cidrBlockID).Scan(&cidrRange)
 
@@ -569,10 +572,10 @@ func (s *Store) allocateIPTx(ctx context.Context, tx *sql.Tx, cidrBlockID int64,
 	var address string
 	nowMilli := time.Now().UTC().UnixMilli()
 	err = tx.QueryRowContext(ctx, `
-		UPDATE ip_addresses 
-		SET is_allocated = TRUE, container_id = ?, interface_name = ?, allocated_at = ? 
+		UPDATE ip_addresses
+		SET is_allocated = TRUE, container_id = ?, interface_name = ?, allocated_at = ?
 		WHERE id = (
-			SELECT id FROM ip_addresses 
+			SELECT id FROM ip_addresses
 			WHERE cidr_block_id = ? AND is_allocated = FALSE AND (release_at IS NULL OR release_at <= ?)
 			ORDER BY id ASC
 			LIMIT 1
@@ -589,8 +592,8 @@ func (s *Store) allocateIPTx(ctx context.Context, tx *sql.Tx, cidrBlockID int64,
 
 	// Also increment allocated_ips in cidr_blocks to keep it in sync
 	_, err = tx.ExecContext(ctx, `
-		UPDATE cidr_blocks 
-		SET allocated_ips = allocated_ips + 1 
+		UPDATE cidr_blocks
+		SET allocated_ips = allocated_ips + 1
 		WHERE id = ?
 	`, cidrBlockID)
 
@@ -607,25 +610,26 @@ func (s *Store) allocateIP(ctx context.Context, params AllocateIPParams) (string
 	var address string
 	var cidrRange string
 	err := s.db.QueryRowContext(ctx, `
-		SELECT i.address, c.cidr 
-		FROM ip_addresses i 
-		JOIN cidr_blocks c ON i.cidr_block_id = c.id 
+		SELECT i.address, c.cidr
+		FROM ip_addresses i
+		JOIN cidr_blocks c ON i.cidr_block_id = c.id
 		WHERE i.container_id = ? AND i.interface_name = ? AND i.is_allocated = TRUE AND c.ip_family = ?
 		LIMIT 1
 	`, params.ContainerID, params.InterfaceName, params.IPFamily).Scan(&address, &cidrRange)
 
 	if err == nil {
-		s.log.Info("Idempotency check hit (fast path), returning existing allocation", "containerID", params.ContainerID, "interfaceName", params.InterfaceName, "address", address, "cidr", cidrRange)
+		s.log.V(4).Info("Idempotency check hit (fast path), returning existing allocation", "containerID", params.ContainerID, "interfaceName", params.InterfaceName, "address", address, "cidr", cidrRange)
 		return address, cidrRange, nil
 	}
 	if err != sql.ErrNoRows {
 		return "", "", fmt.Errorf("failed during fast-path idempotency check: %w", err)
 	}
 
-	// 2. Query available CIDRs (Outside write transaction)
+	// 2. Query available CIDRs in order of block ID (oldest first for defragmentation)
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id FROM cidr_blocks 
+		SELECT id FROM cidr_blocks
 		WHERE network = ? AND ip_family = ? AND total_ips > allocated_ips AND state = 'Ready'
+		ORDER BY id ASC
 	`, params.Network, params.IPFamily)
 	if err != nil {
 		return "", "", fmt.Errorf("failed to query available cidr blocks: %w", err)
@@ -669,7 +673,7 @@ func (s *Store) allocateIP(ctx context.Context, params AllocateIPParams) (string
 				break // Successfully expanded one block!
 			}
 			if errors.Is(err, ErrCidrBlockExhausted) {
-				s.log.Info("CIDR block exhausted, trying next one for expansion", "cidrBlockID", cidrBlockID)
+				s.log.V(4).Info("CIDR block exhausted, trying next one for expansion", "cidrBlockID", cidrBlockID)
 				continue
 			}
 			return "", "", fmt.Errorf("failed to expand IPv6 block %d: %w", cidrBlockID, err)
@@ -694,15 +698,15 @@ func (s *Store) tryAllocateIPInBlock(ctx context.Context, params AllocateIPParam
 
 	var address, cidrRange string
 	err = tx.QueryRowContext(ctx, `
-		SELECT i.address, c.cidr 
-		FROM ip_addresses i 
-		JOIN cidr_blocks c ON i.cidr_block_id = c.id 
+		SELECT i.address, c.cidr
+		FROM ip_addresses i
+		JOIN cidr_blocks c ON i.cidr_block_id = c.id
 		WHERE i.container_id = ? AND i.interface_name = ? AND i.is_allocated = TRUE AND c.ip_family = ?
 		LIMIT 1
 	`, params.ContainerID, params.InterfaceName, params.IPFamily).Scan(&address, &cidrRange)
 
 	if err == nil {
-		s.log.Info("Idempotency check hit (slow path), returning existing allocation", "containerID", params.ContainerID, "interfaceName", params.InterfaceName, "address", address, "cidr", cidrRange)
+		s.log.V(4).Info("Idempotency check hit (slow path), returning existing allocation", "containerID", params.ContainerID, "interfaceName", params.InterfaceName, "address", address, "cidr", cidrRange)
 		return address, cidrRange, nil
 	}
 	if err != sql.ErrNoRows {
@@ -726,9 +730,9 @@ func (s *Store) tryAllocateIPInBlock(ctx context.Context, params AllocateIPParam
 func (s *Store) getNextIPv6StartAddr(ctx context.Context, tx *sql.Tx, cidrBlockID int64, prefix netip.Prefix) (netip.Addr, error) {
 	var lastAddressStr string
 	err := tx.QueryRowContext(ctx, `
-		SELECT address FROM ip_addresses 
-		WHERE cidr_block_id = ? 
-		ORDER BY id DESC 
+		SELECT address FROM ip_addresses
+		WHERE cidr_block_id = ?
+		ORDER BY id DESC
 		LIMIT 1
 	`, cidrBlockID).Scan(&lastAddressStr)
 
@@ -758,18 +762,18 @@ func (s *Store) expandIPv6Block(ctx context.Context, cidrBlockID int64) error {
 	var hasAvailable int
 	nowMilli := time.Now().UTC().UnixMilli()
 	err = tx.QueryRowContext(ctx, `
-		SELECT COUNT(id) FROM ip_addresses 
+		SELECT COUNT(id) FROM ip_addresses
 		WHERE cidr_block_id = ? AND is_allocated = FALSE AND (release_at IS NULL OR release_at <= ?)
 	`, cidrBlockID, nowMilli).Scan(&hasAvailable)
 	if err == nil && hasAvailable > 0 {
-		s.log.Info("Block already has available IPs, skipping expansion", "cidrBlockID", cidrBlockID)
+		s.log.V(4).Info("Block already has available IPs, skipping expansion", "cidrBlockID", cidrBlockID)
 		return nil
 	}
 
 	// 1. Fetch CIDR range for the given ID
 	var cidrRange string
 	err = tx.QueryRowContext(ctx, `
-		SELECT cidr FROM cidr_blocks 
+		SELECT cidr FROM cidr_blocks
 		WHERE id = ? AND ip_family = 'ipv6' AND total_ips > allocated_ips AND state = 'Ready'
 	`, cidrBlockID).Scan(&cidrRange)
 
@@ -808,7 +812,7 @@ func (s *Store) expandIPv6Block(ctx context.Context, cidrBlockID int64) error {
 
 	// 4. Insert them
 	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name) 
+		INSERT INTO ip_addresses (cidr_block_id, address, is_allocated, container_id, interface_name)
 		VALUES (?, ?, FALSE, '', '')
 	`)
 	if err != nil {
@@ -852,12 +856,12 @@ func (s *Store) GetIPUsage(ctx context.Context, network string, ipFamily IPFamil
 	var usage NetworkIPUsage
 	nowMilli := time.Now().UTC().UnixMilli()
 	err := s.db.QueryRowContext(ctx, `
-		SELECT 
+		SELECT
 			IFNULL(SUM(allocated_ips), 0) AS allocated,
 			(
-				SELECT COUNT(i.id) 
-				FROM ip_addresses i 
-				JOIN cidr_blocks cb ON i.cidr_block_id = cb.id 
+				SELECT COUNT(i.id)
+				FROM ip_addresses i
+				JOIN cidr_blocks cb ON i.cidr_block_id = cb.id
 				WHERE cb.network = ? AND cb.state != ? AND cb.ip_family = ? AND i.is_allocated = FALSE AND i.release_at > ?
 			) AS cooldown,
 			IFNULL(SUM(total_ips), 0) AS total_ips,
@@ -924,9 +928,9 @@ func (s *Store) GetAllNetworks(ctx context.Context) ([]string, error) {
 func (s *Store) CheckAllocation(ctx context.Context, network, containerID, interfaceName string) error {
 	var id int64
 	err := s.db.QueryRowContext(ctx, `
-		SELECT i.id 
-		FROM ip_addresses i 
-		JOIN cidr_blocks c ON i.cidr_block_id = c.id 
+		SELECT i.id
+		FROM ip_addresses i
+		JOIN cidr_blocks c ON i.cidr_block_id = c.id
 		WHERE c.network = ? AND i.container_id = ? AND i.interface_name = ? AND i.is_allocated = TRUE
 		LIMIT 1
 	`, network, containerID, interfaceName).Scan(&id)
