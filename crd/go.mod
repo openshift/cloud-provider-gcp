@@ -3,10 +3,11 @@ module k8s.io/cloud-provider-gcp/crd
 go 1.16
 
 require (
-	github.com/docker/spdystream v0.0.0-20160310174837-449fdfce4d96 // indirect
-	k8s.io/api v0.21.1
+	github.com/onsi/ginkgo v1.16.4 // indirect
+	github.com/onsi/gomega v1.13.0 // indirect
+	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b // indirect
 	k8s.io/apimachinery v0.21.1
 	k8s.io/client-go v0.21.1
-	k8s.io/code-generator v0.21.1
-	sigs.k8s.io/controller-tools v0.6.0
 )
+
+replace golang.org/x/net => github.com/openshift-sustaining/net v0.35.0-sec.4
