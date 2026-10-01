@@ -40,7 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	cloudprovider "k8s.io/cloud-provider"
-	utilnet "k8s.io/utils/net"
+	netutils "k8s.io/utils/net"
 )
 
 const (
@@ -72,11 +72,17 @@ func getZone(node *v1.Node) string {
 		return zone
 	}
 	zone, ok = node.Labels[v1.LabelFailureDomainBetaZone]
-	if !ok {
-		klog.Warningf("Node without zone label, returning %q as zone. Node name: %v, node labels: %v", emptyZone, node.Name, node.Labels)
-		return emptyZone
+	if ok {
+		return zone
 	}
-	return zone
+	if node.Spec.ProviderID != "" {
+		_, zone, _, err := splitProviderID(node.Spec.ProviderID)
+		if err == nil && zone != "" {
+			return zone
+		}
+	}
+	klog.Warningf("Node without zone label or providerID, returning %q as zone. Node name: %v, node labels: %v", emptyZone, node.Name, node.Labels)
+	return emptyZone
 }
 
 func makeHostURL(projectsAPIEndpoint, projectID, zone, host string) string {
@@ -104,7 +110,7 @@ func (g *Cloud) orderAddresses(addresses []v1.NodeAddress) []v1.NodeAddress {
 	for _, address := range addresses {
 		ip := net.ParseIP(address.Address)
 		// Non IP addresses as hostname will get a nil ip.
-		if ip == nil || utilnet.IsIPv6(ip) == preferIPv6 {
+		if ip == nil || netutils.IsIPv6(ip) == preferIPv6 {
 			sortedAddresses = append(sortedAddresses, address)
 		}
 	}
@@ -113,7 +119,7 @@ func (g *Cloud) orderAddresses(addresses []v1.NodeAddress) []v1.NodeAddress {
 	for _, address := range addresses {
 		ip := net.ParseIP(address.Address)
 		// Non IP addresses as hostname will get a nil ip.
-		if ip != nil && utilnet.IsIPv6(ip) != preferIPv6 {
+		if ip != nil && netutils.IsIPv6(ip) != preferIPv6 {
 			sortedAddresses = append(sortedAddresses, address)
 		}
 	}
@@ -715,7 +721,8 @@ func (g *Cloud) getFoundInstanceByNames(names []string) ([]*gceInstance, error) 
 		found[name] = nil
 	}
 
-	for _, zone := range g.getManagedZones() {
+	initialZones := g.getManagedZones()
+	for _, zone := range initialZones {
 		if remaining == 0 {
 			break
 		}
@@ -745,6 +752,47 @@ func (g *Cloud) getFoundInstanceByNames(names []string) ([]*gceInstance, error) 
 		}
 	}
 
+	if remaining > 0 && g.dynamicZones {
+		if err := g.refreshManagedZones(); err != nil {
+			klog.Errorf("Failed to refresh GCE managed zones for remaining instances: %v", err)
+		} else {
+			refreshedZones := g.getManagedZones()
+			checkedZones := sets.NewString(initialZones...)
+			for _, zone := range refreshedZones {
+				if remaining == 0 {
+					break
+				}
+				if checkedZones.Has(zone) {
+					continue
+				}
+				instances, err := g.c.Instances().List(ctx, zone, filter.Regexp("name", nodeInstancePrefix+".*"))
+				if err != nil {
+					return nil, err
+				}
+				for _, inst := range instances {
+					if remaining == 0 {
+						break
+					}
+					if _, ok := found[inst.Name]; !ok {
+						continue
+					}
+					if found[inst.Name] != nil {
+						klog.Errorf("Instance name %q was duplicated (in zone %q and %q)", inst.Name, zone, found[inst.Name].Zone)
+						continue
+					}
+					found[inst.Name] = &gceInstance{
+						Zone:  zone,
+						Name:  inst.Name,
+						ID:    inst.Id,
+						Disks: inst.Disks,
+						Type:  lastComponent(inst.MachineType),
+					}
+					remaining--
+				}
+			}
+		}
+	}
+
 	var ret []*gceInstance
 	var failed []string
 	for name, instance := range found {
@@ -761,12 +809,8 @@ func (g *Cloud) getFoundInstanceByNames(names []string) ([]*gceInstance, error) 
 	return ret, nil
 }
 
-// Gets the named instance, returning cloudprovider.InstanceNotFound if the instance is not found
-func (g *Cloud) getInstanceByName(name string) (*gceInstance, error) {
-	klog.Infof("Searching node %s in managed zones %v", name, g.getManagedZones())
-
-	// Avoid changing behaviour when not managing multiple zones
-	for _, zone := range g.getManagedZones() {
+func (g *Cloud) findInstanceInZones(name string, zones []string) (*gceInstance, error) {
+	for _, zone := range zones {
 		instance, err := g.getInstanceFromProjectInZoneByName(g.projectID, zone, name)
 		if err != nil {
 			if isHTTPErrorCode(err, http.StatusNotFound) {
@@ -776,6 +820,33 @@ func (g *Cloud) getInstanceByName(name string) (*gceInstance, error) {
 			return nil, err
 		}
 		return instance, nil
+	}
+	return nil, nil
+}
+
+// Gets the named instance, returning cloudprovider.InstanceNotFound if the instance is not found
+func (g *Cloud) getInstanceByName(name string) (*gceInstance, error) {
+	initialZones := g.getManagedZones()
+	klog.Infof("Searching node %s in managed zones %v", name, initialZones)
+
+	if instance, err := g.findInstanceInZones(name, initialZones); err != nil || instance != nil {
+		return instance, err
+	}
+
+	if g.dynamicZones {
+		klog.Infof("Node %s not found in managed zones %v; attempting dynamic zone refresh", name, initialZones)
+		if err := g.refreshManagedZones(); err != nil {
+			klog.Errorf("Failed to refresh GCE managed zones: %v", err)
+		} else {
+			refreshedZones := g.getManagedZones()
+			newZones := sets.NewString(refreshedZones...).Difference(sets.NewString(initialZones...)).List()
+			if len(newZones) > 0 {
+				klog.Infof("Searching node %s in newly discovered zones %v", name, newZones)
+				if instance, err := g.findInstanceInZones(name, newZones); err != nil || instance != nil {
+					return instance, err
+				}
+			}
+		}
 	}
 
 	return nil, cloudprovider.InstanceNotFound
@@ -961,4 +1032,191 @@ func (g *Cloud) InstanceByProviderID(providerID string) (res *compute.Instance, 
 		return nil, err
 	}
 	return res, nil
+}
+
+// UpdateInstanceAliasIPRanges updates the alias IP ranges for a specific network interface of an instance.
+// It takes the providerID, the target network URL, and the additions/removals.
+// It returns an error if the mutation fails.
+//
+// Additions and removals are applied as two separate updateNetworkInterface
+// calls. GCE rejects a single call that tries to do both, with
+// "Cannot simultaneously add and remove alias IP ranges", so batching them into
+// one request is not an option.
+//
+// Removals go first. The caller decides how much to add after discounting the
+// ranges it is about to release, so the additions it asks for already assume
+// the removals have happened; adding first would hold both sets at once and can
+// fail on a subnet with little headroom. Either order is safe to interrupt --
+// reconciliation is level-triggered, so a partially applied change is
+// recomputed on the next pass -- but this order keeps peak consumption at the
+// steady-state value.
+func (g *Cloud) UpdateInstanceAliasIPRanges(
+	ctx context.Context,
+	providerID string,
+	networkURL string,
+	additions []string, // e.g. ["/28"]
+	removals []string, // e.g. ["10.100.0.0/28"]
+	candidateSubnetworkRangeNames []string, // e.g. ["pod-range-1", "pod-range-2"]
+) error {
+	klog.V(2).Infof("UpdateInstanceAliasIPRanges: providerID=%q, networkURL=%q, additions=%v, removals=%v, candidateSubnetworkRangeNames=%v", providerID, networkURL, additions, removals, candidateSubnetworkRangeNames)
+
+	if len(removals) > 0 {
+		removalSet := sets.NewString(removals...)
+		err := g.mutateAliasIPRanges(ctx, providerID, networkURL, func(ifaceName string, current []*computebeta.AliasIpRange) []*computebeta.AliasIpRange {
+			kept := []*computebeta.AliasIpRange{}
+			for _, r := range current {
+				if removalSet.Has(r.IpCidrRange) {
+					klog.V(4).Infof("Removing alias IP range %q from interface %q", r.IpCidrRange, ifaceName)
+					continue
+				}
+				kept = append(kept, r)
+			}
+			return kept
+		})
+		if err != nil {
+			return fmt.Errorf("failed to remove alias IP ranges %v: %w", removals, err)
+		}
+	}
+
+	if len(additions) > 0 {
+		err := g.mutateAliasIPRanges(ctx, providerID, networkURL, func(ifaceName string, current []*computebeta.AliasIpRange) []*computebeta.AliasIpRange {
+			next := append([]*computebeta.AliasIpRange{}, current...)
+			for _, add := range additions {
+				klog.V(4).Infof("Adding alias IP range size %q to interface %q", add, ifaceName)
+				aliasRange := &computebeta.AliasIpRange{
+					IpCidrRange: add,
+				}
+				if len(candidateSubnetworkRangeNames) > 0 {
+					aliasRange.CandidateSubnetworkRangeNames = candidateSubnetworkRangeNames
+				}
+				next = append(next, aliasRange)
+			}
+			return next
+		})
+		if err != nil {
+			return fmt.Errorf("failed to add alias IP ranges %v: %w", additions, err)
+		}
+	}
+
+	return nil
+}
+
+// mutateAliasIPRanges performs a single read-modify-write of one network
+// interface's alias IP ranges. mutate receives the interface's current ranges
+// and returns the complete desired list.
+//
+// The read is part of the write, not a caching opportunity:
+// updateNetworkInterface is guarded by the interface fingerprint, and every
+// successful update changes it. Two updates in sequence must therefore re-read
+// in between rather than reusing the first fingerprint.
+func (g *Cloud) mutateAliasIPRanges(
+	ctx context.Context,
+	providerID string,
+	networkURL string,
+	mutate func(ifaceName string, current []*computebeta.AliasIpRange) []*computebeta.AliasIpRange,
+) error {
+	project, zone, name, err := splitProviderID(providerID)
+	if err != nil {
+		return err
+	}
+	name = canonicalizeInstanceName(name)
+
+	// Get the GCE Instance to get current interfaces and fingerprints
+	var instance *computebeta.Instance
+	if g.projectFromNodeProviderID {
+		// TODO: Use v1 API once the client SDK starts generating it.
+		instance, err = g.c.BetaInstances().Get(ctx, meta.ZonalKey(name, zone), cloud.ForceProjectID(project))
+	} else {
+		instance, err = g.c.BetaInstances().Get(ctx, meta.ZonalKey(name, zone))
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get GCE instance %q in zone %q: %w", name, zone, err)
+	}
+
+	// Find the target network interface by Network URL
+	var targetIface *computebeta.NetworkInterface
+	for _, iface := range instance.NetworkInterfaces {
+		if equalResourceURLs(iface.Network, networkURL) {
+			targetIface = iface
+			break
+		}
+	}
+
+	if targetIface == nil {
+		return fmt.Errorf("network interface for network %q not found on instance %q", networkURL, name)
+	}
+
+	newRanges := mutate(targetIface.Name, targetIface.AliasIpRanges)
+	if newRanges == nil {
+		newRanges = []*computebeta.AliasIpRange{}
+	}
+
+	// Prepare the update body
+	ifaceUpdate := &computebeta.NetworkInterface{
+		Name:          targetIface.Name,
+		Fingerprint:   targetIface.Fingerprint,
+		AliasIpRanges: newRanges,
+	}
+
+	// Call UpdateNetworkInterface (blocks until LRO completes)
+	mc := newInstancesMetricContext("update_instance_alias_ip_ranges", zone)
+	if g.projectFromNodeProviderID {
+		err = g.c.BetaInstances().UpdateNetworkInterface(ctx, meta.ZonalKey(name, zone), targetIface.Name, ifaceUpdate, cloud.ForceProjectID(project))
+	} else {
+		err = g.c.BetaInstances().UpdateNetworkInterface(ctx, meta.ZonalKey(name, zone), targetIface.Name, ifaceUpdate)
+	}
+	if err = mc.Observe(err); err != nil {
+		return fmt.Errorf("failed to update network interface %q on instance %q: %w", targetIface.Name, name, err)
+	}
+
+	return nil
+}
+
+// GetInstanceNetworkInterfaces retrieves the network interfaces for a given instance.
+// It is used by the controller's loading cache to fetch fresh GCE state.
+func (g *Cloud) GetInstanceNetworkInterfaces(ctx context.Context, providerID string) ([]*computebeta.NetworkInterface, error) {
+	project, zone, name, err := splitProviderID(providerID)
+	if err != nil {
+		return nil, err
+	}
+	name = canonicalizeInstanceName(name)
+
+	var instance *computebeta.Instance
+	if g.projectFromNodeProviderID {
+		instance, err = g.c.BetaInstances().Get(ctx, meta.ZonalKey(name, zone), cloud.ForceProjectID(project))
+	} else {
+		instance, err = g.c.BetaInstances().Get(ctx, meta.ZonalKey(name, zone))
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get GCE instance %q in zone %q: %w", name, zone, err)
+	}
+
+	return instance.NetworkInterfaces, nil
+}
+
+// EqualResourceURLs checks if two GCP resource URLs refer to the same resource,
+// taking into account URL formatting differences (e.g. API versions or domains).
+func EqualResourceURLs(url1, url2 string) bool {
+	return equalResourceURLs(url1, url2)
+}
+
+// equalResourceURLs checks if two GCP resource URLs refer to the same resource,
+// taking into account URL formatting differences (e.g. API versions or domains).
+func equalResourceURLs(url1, url2 string) bool {
+	if url1 == url2 {
+		return true
+	}
+	r1, err1 := cloud.ParseResourceURL(url1)
+	r2, err2 := cloud.ParseResourceURL(url2)
+	if err1 == nil && err2 == nil {
+		if r1.Equal(r2) {
+			return true
+		}
+		// If one URL is a relative path without an API group (e.g. projects/.../global/networks/...),
+		// compare project, resource type, and key directly.
+		if r1.ProjectID == r2.ProjectID && r1.Resource == r2.Resource && r1.Key != nil && r2.Key != nil && *r1.Key == *r2.Key {
+			return true
+		}
+	}
+	return false
 }

@@ -32,6 +32,7 @@ import (
 // TestClusterValues holds the config values for the fake/test gce cloud object.
 type TestClusterValues struct {
 	ProjectID               string
+	NetworkProjectID        string
 	Region                  string
 	ZoneName                string
 	SecondaryZoneName       string
@@ -77,13 +78,17 @@ func NewFakeGCECloud(vals TestClusterValues) *Cloud {
 	if err != nil {
 		panic(err)
 	}
+	netProjID := vals.NetworkProjectID
+	if netProjID == "" {
+		netProjID = vals.ProjectID
+	}
 	gce := &Cloud{
 		region:                  vals.Region,
 		service:                 service,
-		managedZones:            []string{vals.ZoneName, vals.SecondaryZoneName},
+		managedZones:            []string{vals.ZoneName},
 		localZone:               vals.ZoneName,
 		projectID:               vals.ProjectID,
-		networkProjectID:        vals.ProjectID,
+		networkProjectID:        netProjID,
 		ClusterID:               fakeClusterID(vals.ClusterID),
 		onXPN:                   vals.OnXPN,
 		metricsCollector:        newLoadBalancerMetrics(),
