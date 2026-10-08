@@ -46,6 +46,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
@@ -238,20 +239,19 @@ type Cloud struct {
 	// enableRBSDefaultForL4NetLB disable Service controller from picking up services by default
 	enableRBSDefaultForL4NetLB bool
 
-	// enableL4LBAnnotations enables adding resource annotations to L4 load balancer services.
+	// enableL4LBAnnotations enable annotations related to provisioned resources in GCE
 	enableL4LBAnnotations bool
 
-	// enableL4DenyFirewallRule enables creation of a deny firewall rule for L4 load balancers.
+	// enableL4DenyFirewallRule creates an additional deny firewall rule at priority 1000
+	// and moves the allow rule to priority 999 to improve security posture.
 	enableL4DenyFirewallRule bool
 
-	// enableL4DenyFirewallRollbackCleanup enables cleanup of deny firewall rules when the feature is rolled back.
+	// enableL4DenyFirewallRollbackCleanup
 	enableL4DenyFirewallRollbackCleanup bool
 
 	// enableL4ILBFineGrainedLocks enables fine-grained resource-specific locking
 	enableL4ILBFineGrainedLocks bool
 
-	// FirewallRulesManagement indicates whether the provider should handle all firewall
-	// operations, such as creation, deletion, and updates.
 	firewallRulesManagement FirewallRulesManagement
 }
 
@@ -352,10 +352,6 @@ type ConfigGlobal struct {
 	// ExternalInstanceGroupsPrefix, when not-empty, is used to filter instance groups (from an external GCP Project)
 	// and include them in the backend for ILB.
 	ExternalInstanceGroupsPrefix string `gcfg:"external-instance-groups-prefix"`
-
-	// FirewallRulesManagement indicates whether the provider should handle all firewall
-	// operations, such as creation, deletion, and updates.
-	FirewallRulesManagement string `gcfg:"firewall-rules-management"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -391,7 +387,6 @@ type CloudConfig struct {
 	AlphaFeatureGate             *AlphaFeatureGate
 	StackType                    string
 	ExternalInstanceGroupsPrefix string
-	FirewallRulesManagement      string
 }
 
 func init() {
@@ -484,7 +479,6 @@ func GenerateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 		cloudConfig.NodeInstancePrefix = configFile.Global.NodeInstancePrefix
 		cloudConfig.AlphaFeatureGate = NewAlphaFeatureGate(configFile.Global.AlphaFeatures)
 		cloudConfig.ExternalInstanceGroupsPrefix = configFile.Global.ExternalInstanceGroupsPrefix
-		cloudConfig.FirewallRulesManagement = configFile.Global.FirewallRulesManagement
 	}
 
 	// retrieve projectID and zone
@@ -725,7 +719,6 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 		projectsBasePath:             getProjectsBasePath(service.BasePath),
 		stackType:                    StackType(config.StackType),
 		externalInstanceGroupsPrefix: config.ExternalInstanceGroupsPrefix,
-		firewallRulesManagement:      FirewallRulesManagement(config.FirewallRulesManagement),
 	}
 
 	gce.manager = &gceServiceManager{gce}
@@ -860,6 +853,9 @@ func (g *Cloud) Initialize(clientBuilder cloudprovider.ControllerClientBuilder, 
 
 	go g.watchClusterID(stop)
 	go g.metricsCollector.Run(stop)
+	if g.dynamicZones {
+		go g.syncManagedZonesPeriodically(stop)
+	}
 }
 
 // LoadBalancer returns an implementation of LoadBalancer for Google Compute Engine.
@@ -1206,4 +1202,12 @@ func (g *Cloud) refreshManagedZones() error {
 	}
 
 	return nil
+}
+
+func (g *Cloud) syncManagedZonesPeriodically(stop <-chan struct{}) {
+	wait.Until(func() {
+		if err := g.refreshManagedZones(); err != nil {
+			klog.Errorf("Periodic refresh of GCE managed zones failed: %v", err)
+		}
+	}, 5*time.Minute, stop)
 }

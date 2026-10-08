@@ -38,6 +38,7 @@ import (
 	cloudprovider "k8s.io/cloud-provider"
 	servicehelpers "k8s.io/cloud-provider/service/helpers"
 	"k8s.io/klog/v2"
+	netutils "k8s.io/utils/net"
 )
 
 const (
@@ -491,11 +492,6 @@ func (g *Cloud) teardownInternalBackendService(bsName string) error {
 }
 
 func (g *Cloud) teardownInternalHealthCheckAndFirewall(svc *v1.Service, hcName string, shared bool) error {
-	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		klog.V(2).Infof("teardownInternalHealthCheckAndFirewall(%v): unmanaged firewall rules", hcName)
-		return nil
-	}
-
 	hcFirewallName := makeHealthCheckFirewallNameFromHC(hcName)
 	defer g.lockHealthCheck(hcName, shared)()
 	defer g.lockFirewall(hcFirewallName, shared)()
@@ -512,6 +508,11 @@ func (g *Cloud) teardownInternalHealthCheckAndFirewall(svc *v1.Service, hcName s
 		}
 	}
 	klog.V(2).Infof("teardownInternalHealthCheckAndFirewall(%v): health check deleted", hcName)
+
+	if g.firewallRulesManagement == firewallRulesManagementDisabled {
+		klog.V(2).Infof("teardownInternalHealthCheckAndFirewall(%v): unmanaged firewall rules", hcName)
+		return nil
+	}
 
 	if err := ignoreNotFound(g.DeleteFirewall(hcFirewallName)); err != nil {
 		if isForbidden(err) && g.OnXPN() {
@@ -627,7 +628,8 @@ func (g *Cloud) ensureInternalFirewalls(loadBalancerName, ipAddress, clusterID s
 
 	// Second firewall is for health checking nodes / services
 	fwHCName := makeHealthCheckFirewallName(loadBalancerName, clusterID, sharedHealthCheck)
-	hcSrcRanges := L4LoadBalancerSrcRanges()
+	isIPv6 := netutils.IsIPv6String(ipAddress)
+	hcSrcRanges := L4ILBHealthCheckSrcRanges(sharedHealthCheck, isIPv6).StringSlice()
 	return g.ensureInternalFirewall(svc, fwHCName, "", "", hcSrcRanges, []string{healthCheckPort}, v1.ProtocolTCP, nodes, "", sharedHealthCheck)
 }
 

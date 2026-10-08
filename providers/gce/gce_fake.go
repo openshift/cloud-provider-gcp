@@ -32,6 +32,7 @@ import (
 // TestClusterValues holds the config values for the fake/test gce cloud object.
 type TestClusterValues struct {
 	ProjectID               string
+	NetworkProjectID        string
 	Region                  string
 	ZoneName                string
 	SecondaryZoneName       string
@@ -77,24 +78,27 @@ func NewFakeGCECloud(vals TestClusterValues) *Cloud {
 	if err != nil {
 		panic(err)
 	}
+	netProjID := vals.NetworkProjectID
+	if netProjID == "" {
+		netProjID = vals.ProjectID
+	}
 	gce := &Cloud{
-		region:                  vals.Region,
-		service:                 service,
-		managedZones:            []string{vals.ZoneName, vals.SecondaryZoneName},
-		localZone:               vals.ZoneName,
-		projectID:               vals.ProjectID,
-		networkProjectID:        vals.ProjectID,
-		ClusterID:               fakeClusterID(vals.ClusterID),
-		onXPN:                   vals.OnXPN,
-		metricsCollector:        newLoadBalancerMetrics(),
-		projectsBasePath:        getProjectsBasePath(service.BasePath),
-		regional:                vals.Regional,
-		dynamicZones:            vals.Regional,
-		networkURL:              vals.NetworkURL,
-		unsafeSubnetworkURL:     vals.SubnetworkURL,
-		stackType:               vals.StackType,
-		nodeZones:               map[string]sets.String{},
-		firewallRulesManagement: vals.FirewallRulesManagement,
+		region:              vals.Region,
+		service:             service,
+		managedZones:        []string{vals.ZoneName, vals.SecondaryZoneName},
+		localZone:           vals.ZoneName,
+		projectID:           vals.ProjectID,
+		networkProjectID:    vals.ProjectID,
+		ClusterID:           fakeClusterID(vals.ClusterID),
+		onXPN:               vals.OnXPN,
+		metricsCollector:    newLoadBalancerMetrics(),
+		projectsBasePath:    getProjectsBasePath(service.BasePath),
+		regional:            vals.Regional,
+		dynamicZones:        vals.Regional,
+		networkURL:          vals.NetworkURL,
+		unsafeSubnetworkURL: vals.SubnetworkURL,
+		stackType:           vals.StackType,
+		nodeZones:           map[string]sets.String{},
 	}
 	c := cloud.NewMockGCE(&gceProjectRouter{gce})
 	gce.c = c
