@@ -692,6 +692,7 @@ func TestUpdateNodeZonesDynamicRefresh(t *testing.T) {
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.managedZones = []string{vals.ZoneName}
 	gce.dynamicZones = true
 
 	// Initial managed zones should only contain the default zone
