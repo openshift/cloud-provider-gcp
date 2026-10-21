@@ -117,14 +117,13 @@ func TestLoadNetConf(t *testing.T) {
 			},
 		},
 		{
-			name: "Valid daemon socket, log file, and release cooldown overrides",
+			name: "Valid daemon socket and log file overrides",
 			input: []byte(`{
 				"name": "test-overrides",
 				"cniVersion": "0.4.0",
 				"type": "metis",
 				"daemonSocket": "/var/run/metis-test.sock",
 				"logFile": "/var/log/metis-test.log",
-				"releaseCooldown": "2m",
 				"ipam": {"type": "metis"}
 			}`),
 			validate: func(t *testing.T, conf *PluginConf) {
@@ -133,9 +132,6 @@ func TestLoadNetConf(t *testing.T) {
 				}
 				if conf.LogFile != "/var/log/metis-test.log" {
 					t.Errorf("expected custom logFile, got %s", conf.LogFile)
-				}
-				if conf.ReleaseCooldown != "2m" {
-					t.Errorf("expected custom releaseCooldown 2m, got %s", conf.ReleaseCooldown)
 				}
 			},
 		},

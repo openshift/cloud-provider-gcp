@@ -4,6 +4,7 @@
 // license that can be found in the LICENSE file.
 
 //go:build sqlite_trace || trace
+// +build sqlite_trace trace
 
 package sqlite3
 

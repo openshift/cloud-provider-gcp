@@ -22,6 +22,10 @@ import (
 	"time"
 )
 
+const (
+	maxRetryAttempts = 5
+)
+
 var (
 	syscallRetryable = func(error) bool { return false }
 )
@@ -57,69 +61,21 @@ func Sleep(ctx context.Context, d time.Duration) error {
 
 // New returns a new Retryer with the default backoff strategy.
 func New() *Retryer {
-	return NewWithOptions(&Options{
-		Initial:     100 * time.Millisecond,
-		Max:         30 * time.Second,
-		Multiplier:  2,
-		MaxAttempts: 5,
-	})
-}
-
-// Options defines the configuration for the Retryer.
-type Options struct {
-	// Initial is the initial backoff duration.
-	Initial time.Duration
-	// Max is the maximum backoff duration for a single retry attempt.
-	// It does not limit the total time of all retries.
-	Max time.Duration
-	// Multiplier is the factor by which the backoff duration is multiplied after each attempt.
-	Multiplier float64
-	// MaxAttempts is the maximum number of attempts before giving up.
-	MaxAttempts int
-}
-
-// NewWithOptions returns a new Retryer with the specified backoff strategy.
-// If any option is not set (zero value), it defaults to the values used in New().
-func NewWithOptions(opts *Options) *Retryer {
-	initial := opts.Initial
-	if initial <= 0 {
-		initial = 100 * time.Millisecond
-	}
-
-	max := opts.Max
-	if max <= 0 {
-		max = 30 * time.Second
-	}
-
-	multiplier := opts.Multiplier
-	if multiplier < 1.0 {
-		multiplier = 2.0
-	}
-
-	maxAttempts := opts.MaxAttempts
-	if maxAttempts <= 0 {
-		maxAttempts = 5
-	}
-
-	return &Retryer{
-		bo: &defaultBackoff{
-			cur: initial,
-			max: max,
-			mul: multiplier,
-		},
-		maxAttempts: maxAttempts,
-	}
+	return &Retryer{bo: &defaultBackoff{
+		cur: 100 * time.Millisecond,
+		max: 30 * time.Second,
+		mul: 2,
+	}}
 }
 
 type backoff interface {
 	Pause() time.Duration
 }
 
-// Retryer handles retry logic for HTTP requests using a configurable backoff strategy.
+// Retryer is a retryer for HTTP requests.
 type Retryer struct {
-	bo          backoff
-	attempts    int
-	maxAttempts int
+	bo       backoff
+	attempts int
 }
 
 // Retry determines if a request should be retried.
@@ -131,7 +87,7 @@ func (r *Retryer) Retry(status int, err error) (time.Duration, bool) {
 	if !retryOk {
 		return 0, false
 	}
-	if r.attempts == r.maxAttempts {
+	if r.attempts == maxRetryAttempts {
 		return 0, false
 	}
 	r.attempts++

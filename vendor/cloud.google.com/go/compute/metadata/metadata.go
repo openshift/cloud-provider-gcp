@@ -889,9 +889,7 @@ func (c *Client) SubscribeWithContext(ctx context.Context, suffix string, fn fun
 	const failedSubscribeSleep = time.Second * 5
 
 	// First check to see if the metadata value exists at all.
-	initCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	val, lastETag, err := c.getETagWithSubClient(initCtx, suffix, true)
-	cancel()
+	val, lastETag, err := c.getETagWithSubClient(ctx, suffix, true)
 	if err != nil {
 		return err
 	}

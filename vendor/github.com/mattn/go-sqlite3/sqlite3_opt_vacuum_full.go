@@ -5,6 +5,7 @@
 // license that can be found in the LICENSE file.
 
 //go:build sqlite_vacuum_full
+// +build sqlite_vacuum_full
 
 package sqlite3
 

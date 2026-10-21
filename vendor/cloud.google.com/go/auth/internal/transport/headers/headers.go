@@ -15,20 +15,14 @@
 package headers
 
 import (
-	"context"
 	"net/http"
 
 	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/internal"
-	"cloud.google.com/go/auth/internal/regionalaccessboundary"
 )
 
-type regionalAccessBoundaryProvider interface {
-	GetHeaderValue(ctx context.Context, reqURL string, token *auth.Token) string
-}
-
-// SetAuthHeader uses the provided token to set the Authorization and regional
-// access boundary headers on a request. If the token.Type is empty, the type is
+// SetAuthHeader uses the provided token to set the Authorization and trust
+// boundary headers on a request. If the token.Type is empty, the type is
 // assumed to be Bearer.
 func SetAuthHeader(token *auth.Token, req *http.Request) {
 	typ := token.Type
@@ -37,26 +31,31 @@ func SetAuthHeader(token *auth.Token, req *http.Request) {
 	}
 	req.Header.Set("Authorization", typ+" "+token.Value)
 
-	if provider, ok := token.Metadata[regionalaccessboundary.ProviderKey].(regionalAccessBoundaryProvider); ok {
-		if headerVal := provider.GetHeaderValue(req.Context(), req.URL.String(), token); headerVal != "" {
-			req.Header.Set("x-allowed-locations", headerVal)
-		}
+	if headerVal, setHeader := getTrustBoundaryHeader(token); setHeader {
+		req.Header.Set("x-allowed-locations", headerVal)
 	}
 }
 
-// SetAuthMetadata uses the provided token to set the Authorization and regional
-// access boundary metadata. If the token.Type is empty, the type is assumed to be
+// SetAuthMetadata uses the provided token to set the Authorization and trust
+// boundary metadata. If the token.Type is empty, the type is assumed to be
 // Bearer.
-func SetAuthMetadata(ctx context.Context, token *auth.Token, reqURL string, m map[string]string) {
+func SetAuthMetadata(token *auth.Token, m map[string]string) {
 	typ := token.Type
 	if typ == "" {
 		typ = internal.TokenTypeBearer
 	}
 	m["authorization"] = typ + " " + token.Value
 
-	if provider, ok := token.Metadata[regionalaccessboundary.ProviderKey].(regionalAccessBoundaryProvider); ok {
-		if headerVal := provider.GetHeaderValue(ctx, reqURL, token); headerVal != "" {
-			m["x-allowed-locations"] = headerVal
+	if headerVal, setHeader := getTrustBoundaryHeader(token); setHeader {
+		m["x-allowed-locations"] = headerVal
+	}
+}
+
+func getTrustBoundaryHeader(token *auth.Token) (val string, present bool) {
+	if data, ok := token.Metadata[internal.TrustBoundaryDataKey]; ok {
+		if tbd, ok := data.(internal.TrustBoundaryData); ok {
+			return tbd.TrustBoundaryHeader()
 		}
 	}
+	return "", false
 }

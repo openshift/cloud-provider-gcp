@@ -37,21 +37,11 @@ type certificateConfig struct {
 	CertConfigs certConfigs `json:"cert_configs"`
 }
 
-type certConfigInfo struct {
-	certPath string // path to the certificate file
-	keyPath  string // path to the private key file
-	useECP   bool   // whether to use Enterprise Certificate Proxy
-}
-
-// GetConfigFilePath determines the path to the certificate configuration file.
+// getconfigFilePath determines the path to the certificate configuration file.
 // It first checks for the presence of an environment variable that specifies
 // the file path. If the environment variable is not set, it falls back to
-// a default configuration file path. If a non-empty configFilePath is provided,
-// it is returned.
-func GetConfigFilePath(configFilePath string) string {
-	if configFilePath != "" {
-		return configFilePath
-	}
+// a default configuration file path.
+func getconfigFilePath() string {
 	envFilePath := util.GetConfigFilePathFromEnv()
 	if envFilePath != "" {
 		return envFilePath
@@ -60,32 +50,21 @@ func GetConfigFilePath(configFilePath string) string {
 
 }
 
-// GetFileBasedCertificatePath retrieves the certificate file path from the provided
+// GetCertificatePath retrieves the certificate file path from the provided
 // configuration file. If the configFilePath is empty, it attempts to load
 // the configuration from a well-known gcloud location.
 // This function is exposed to allow other packages, such as the
 // externalaccount package, to retrieve the certificate path without needing
 // to load the entire certificate configuration.
-func GetFileBasedCertificatePath(configFilePath string) (string, error) {
-	configFilePath = GetConfigFilePath(configFilePath)
-	info, err := parseCertConfig(configFilePath)
+func GetCertificatePath(configFilePath string) (string, error) {
+	if configFilePath == "" {
+		configFilePath = getconfigFilePath()
+	}
+	certFile, _, err := getCertAndKeyFiles(configFilePath)
 	if err != nil {
 		return "", err
 	}
-	if info.useECP {
-		return "", errors.New("enterprise certificate proxy is enabled, certificate path is not available")
-	}
-	return info.certPath, nil
-}
-
-// IsECPConfig checks if the given configuration is an ECP certificate configuration.
-func IsECPConfig(configFilePath string) bool {
-	configFilePath = GetConfigFilePath(configFilePath)
-	info, err := parseCertConfig(configFilePath)
-	if err != nil {
-		return false
-	}
-	return info.useECP
+	return certFile, nil
 }
 
 // NewWorkloadX509CertProvider creates a certificate source
@@ -97,19 +76,17 @@ func IsECPConfig(configFilePath string) bool {
 // If configFilePath is empty, the client will attempt to load the config from
 // a well-known gcloud location.
 func NewWorkloadX509CertProvider(configFilePath string) (Provider, error) {
-	configFilePath = GetConfigFilePath(configFilePath)
-	info, err := parseCertConfig(configFilePath)
+	if configFilePath == "" {
+		configFilePath = getconfigFilePath()
+	}
+	certFile, keyFile, err := getCertAndKeyFiles(configFilePath)
 	if err != nil {
 		return nil, err
 	}
 
-	if info.useECP {
-		return NewEnterpriseCertificateProxyProvider(configFilePath)
-	}
-
 	source := &workloadSource{
-		CertPath: info.certPath,
-		KeyPath:  info.keyPath,
+		CertPath: certFile,
+		KeyPath:  keyFile,
 	}
 	return source.getClientCertificate, nil
 }
@@ -124,60 +101,38 @@ func (s *workloadSource) getClientCertificate(info *tls.CertificateRequestInfo) 
 	return &cert, nil
 }
 
-// parseCertConfig attempts to read the provided config file and return the certificate, private
-// key file paths, and a boolean indicating whether to use ECP inside a certConfigInfo struct.
-func parseCertConfig(configFilePath string) (certConfigInfo, error) {
+// getCertAndKeyFiles attempts to read the provided config file and return the certificate and private
+// key file paths.
+func getCertAndKeyFiles(configFilePath string) (string, string, error) {
 	jsonFile, err := os.Open(configFilePath)
 	if err != nil {
-		return certConfigInfo{}, errSourceUnavailable
+		return "", "", errSourceUnavailable
 	}
-	defer jsonFile.Close()
 
 	byteValue, err := io.ReadAll(jsonFile)
 	if err != nil {
-		return certConfigInfo{}, err
+		return "", "", err
 	}
 
 	var config certificateConfig
 	if err := json.Unmarshal(byteValue, &config); err != nil {
-		return certConfigInfo{}, err
+		return "", "", err
 	}
 
 	if config.CertConfigs.Workload == nil {
-		// If 'workload' field is absent, it is an ECP config.
-		// Validate that the config file is a valid ECP file.
-		var rawMap map[string]any
-		if err := json.Unmarshal(byteValue, &rawMap); err != nil {
-			return certConfigInfo{}, err
-		}
-		certConfigs, ok := rawMap["cert_configs"].(map[string]any)
-		if !ok {
-			return certConfigInfo{}, errSourceUnavailable
-		}
-		hasECPSection := false
-		for _, section := range []string{"pkcs11", "windows_store", "macos_keychain"} {
-			if _, exists := certConfigs[section]; exists {
-				hasECPSection = true
-				break
-			}
-		}
-		_, hasLibs := rawMap["libs"]
-		if !hasECPSection || !hasLibs {
-			return certConfigInfo{}, errSourceUnavailable
-		}
-		return certConfigInfo{useECP: true}, nil
+		return "", "", errSourceUnavailable
 	}
 
 	certFile := config.CertConfigs.Workload.CertPath
 	keyFile := config.CertConfigs.Workload.KeyPath
 
 	if certFile == "" {
-		return certConfigInfo{}, errors.New("certificate configuration is missing the certificate file location")
+		return "", "", errors.New("certificate configuration is missing the certificate file location")
 	}
 
 	if keyFile == "" {
-		return certConfigInfo{}, errors.New("certificate configuration is missing the key file location")
+		return "", "", errors.New("certificate configuration is missing the key file location")
 	}
 
-	return certConfigInfo{certPath: certFile, keyPath: keyFile}, nil
+	return certFile, keyFile, nil
 }

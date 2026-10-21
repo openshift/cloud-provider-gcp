@@ -30,15 +30,15 @@ func main() {
 	// Opt into the new klog behavior so that -stderrthreshold is honored even
 	// when -logtostderr=true (the default).
 	// Ref: kubernetes/klog#212, kubernetes/klog#432
-	_ = flag.Set("legacy_stderr_threshold_behavior", "false")
-	_ = flag.Set("stderrthreshold", "INFO")
+	flag.Set("legacy_stderr_threshold_behavior", "false") //nolint:errcheck
+	flag.Set("stderrthreshold", "INFO")                   //nolint:errcheck
 	logs.InitLogs()
 
 	// Base command (defaults to CNI plugin mode)
 	rootCmd := &cobra.Command{
 		Use:   "metis",
 		Short: "Metis implements adaptive cluster IPAM for GKE",
-		Run: func(_ *cobra.Command, _ []string) {
+		Run: func(cmd *cobra.Command, args []string) {
 			runCni()
 		},
 	}
@@ -46,8 +46,6 @@ func main() {
 	// Register subcommands
 	rootCmd.AddCommand(newDaemonCommand())
 	rootCmd.AddCommand(newInstallCommand())
-	rootCmd.AddCommand(newHealthCheckCommand())
-	rootCmd.AddCommand(newAdminCommand())
 
 	// Register standard/logging flags globally
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)

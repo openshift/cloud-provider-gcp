@@ -5,6 +5,7 @@
 // license that can be found in the LICENSE file.
 
 //go:build sqlite_secure_delete_fast
+// +build sqlite_secure_delete_fast
 
 package sqlite3
 

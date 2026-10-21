@@ -93,13 +93,8 @@ func (c *Controller) validateFieldCombinations(ctx context.Context, params *netw
 	}
 
 	// Network attachment is not specified.
-	// check if deviceMode and secondary ranges are unspecified
-	// The associated Network CRs are implicitly IPv4-only, apart from the default network on an IPv6-only cluster.
-	isDefaultGNP := params.Name == c.defaultGNPName
-	canHaveIpv6OnlyNetworksOnly := c.isIPv6OnlyCluster && isDefaultGNP
-
-	// we skip this check for IPv6-only clusters because their default network inherently does not have IPv4 secondary ranges
-	if !canHaveIpv6OnlyNetworksOnly && !hasSecondaryRanges && !hasDeviceMode {
+	// Check if both deviceMode and secondary ranges are unspecified.
+	if !hasSecondaryRanges && !hasDeviceMode {
 		return &gnpValidation{
 			IsValid:      false,
 			ErrorReason:  networkv1.SecondaryRangeAndDeviceModeUnspecified,
@@ -178,14 +173,10 @@ func (c *Controller) validateGKENetworkParamSet(ctx context.Context, params *net
 		}
 	}
 
-	// check if both deviceMode and secondary ranges are unspecified.
-	// The associated Network CRs are implicitly IPv4-only, apart from the default network on an IPv6-only cluster.
+	// check if both deviceMode and secondary ranges are unspecified
 	isSecondaryRangeSpecified := hasRangeNames(params)
 	isDeviceModeSpecified := params.Spec.DeviceMode != ""
-	isDefaultGNP := params.Name == c.defaultGNPName
-	canHaveIpv6OnlyNetworksOnly := c.isIPv6OnlyCluster && isDefaultGNP
-
-	if !canHaveIpv6OnlyNetworksOnly && !isSecondaryRangeSpecified && !isDeviceModeSpecified {
+	if !isSecondaryRangeSpecified && !isDeviceModeSpecified {
 		return &gnpValidation{
 			IsValid:      false,
 			ErrorReason:  networkv1.SecondaryRangeAndDeviceModeUnspecified,
@@ -285,17 +276,14 @@ func (val *gnpNetworkCrossValidation) toCondition() metav1.Condition {
 }
 
 // crossValidateNetworkAndGnp validates a given network and GNP object are compatible
-func crossValidateNetworkAndGnp(network *networkv1.Network, params *networkv1.GKENetworkParamSet, isIPv6OnlyCluster bool, defaultGNPName string, subnet *compute.Subnetwork) *gnpNetworkCrossValidation {
+func crossValidateNetworkAndGnp(network *networkv1.Network, params *networkv1.GKENetworkParamSet) *gnpNetworkCrossValidation {
 	isSecondaryRangeSpecified := hasRangeNames(params)
 	isVPCSpecified := params.Spec.VPC != ""
 	isVPCSubnetSpecified := params.Spec.VPCSubnet != ""
 	isNetworkAttachmentSpecified := params.Spec.NetworkAttachment != ""
 
-	// The associated Network CRs are implicitly IPv4-only, apart from the default network on an IPv6-only cluster.
-	isDefaultGNP := params.Name == defaultGNPName
-	canHaveIpv6OnlyNetworksOnly := isIPv6OnlyCluster && isDefaultGNP
 	if network.Spec.Type == networkv1.L3NetworkType {
-		if !canHaveIpv6OnlyNetworksOnly && isVPCSpecified && isVPCSubnetSpecified && !isSecondaryRangeSpecified {
+		if isVPCSpecified && isVPCSubnetSpecified && !isSecondaryRangeSpecified {
 			return &gnpNetworkCrossValidation{
 				IsValid:      false,
 				ErrorReason:  networkv1.L3SecondaryMissing,
@@ -320,19 +308,6 @@ func crossValidateNetworkAndGnp(network *networkv1.Network, params *networkv1.GK
 		}
 	}
 
-	// Network CR is implicitly IPv4-only, apart from the default network on an IPv6-only cluster.
-	if subnet != nil && subnet.StackType == "IPV6_ONLY" {
-		isAllowedContext := isDefaultGNP && isIPv6OnlyCluster
-
-		if !isAllowedContext {
-			return &gnpNetworkCrossValidation{
-				IsValid:      false,
-				ErrorReason:  networkv1.GNPNetworkParamsReadyConditionReason("SubnetStackTypeIncompatible"),
-				ErrorMessage: "Network CR is not compatible with the subnet's StackType",
-			}
-		}
-	}
-
 	return &gnpNetworkCrossValidation{
 		IsValid: true,
 	}
@@ -340,7 +315,7 @@ func crossValidateNetworkAndGnp(network *networkv1.Network, params *networkv1.GK
 
 // nonDefaultParamsPodRanges returns true if the node has new Pod range that's not in the "default" params
 func (c *Controller) nonDefaultParamsPodRanges(node *v1.Node) bool {
-	defaultPodRanges, err := c.getParamsPodRanges(c.defaultGNPName)
+	defaultPodRanges, err := c.getParamsPodRanges(networkv1.DefaultPodNetworkName)
 	if err != nil {
 		klog.V(4).Infof("check new Pod range on node %q error: %v", node.Name, err)
 		return false
