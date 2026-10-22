@@ -39,6 +39,7 @@ import (
 	computealpha "google.golang.org/api/compute/v0.alpha"
 	computebeta "google.golang.org/api/compute/v0.beta"
 	compute "google.golang.org/api/compute/v1"
+	computepreview "google.golang.org/api/compute/v1.preview"
 	container "google.golang.org/api/container/v1"
 	"google.golang.org/api/option"
 
@@ -147,6 +148,7 @@ type Cloud struct {
 	service          *compute.Service
 	serviceBeta      *computebeta.Service
 	serviceAlpha     *computealpha.Service
+	servicePreview   *computepreview.Service
 	containerService *container.Service
 	tpuService       *tpuService
 	client           clientset.Interface
@@ -185,6 +187,7 @@ type Cloud struct {
 	useMetadataServer        bool
 	operationPollRateLimiter flowcontrol.RateLimiter
 	manager                  diskServiceManager
+	aneService               aneServiceManager
 	// Lock for access to nodeZones
 	nodeZonesLock sync.Mutex
 	// nodeZones maps GCE zones to active K8s Node names, dynamically
@@ -227,14 +230,6 @@ type Cloud struct {
 	//
 	// Enable this ony when the Node's .spec.providerID can be fully trusted.
 	projectFromNodeProviderID bool
-
-	// enableDiscretePortForwarding enables forwarding of individual ports
-	// instead of port ranges in Forwarding Rules for external load balancers.
-	enableDiscretePortForwarding bool
-
-	// externalInstanceGroupsPrefix if set, finds instance groups with
-	// the provided prefix and considers them for ILB backends.
-	externalInstanceGroupsPrefix string
 
 	// enableRBSDefaultForL4NetLB disable Service controller from picking up services by default
 	enableRBSDefaultForL4NetLB bool
@@ -349,9 +344,9 @@ type ConfigGlobal struct {
 	// For example: MyFeatureFlag
 	AlphaFeatures []string `gcfg:"alpha-features"`
 
-	// ExternalInstanceGroupsPrefix, when not-empty, is used to filter instance groups (from an external GCP Project)
-	// and include them in the backend for ILB.
-	ExternalInstanceGroupsPrefix string `gcfg:"external-instance-groups-prefix"`
+	// FirewallRulesManagement indicates whether the provider should handle all firewall
+	// operations, such as creation, deletion, and updates.
+	FirewallRulesManagement string `gcfg:"firewall-rules-management"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -379,14 +374,14 @@ type CloudConfig struct {
 	SubnetworkName       string
 	SubnetworkURL        string
 	// DEPRECATED: Do not rely on this value as it may be incorrect.
-	SecondaryRangeName           string
-	NodeTags                     []string
-	NodeInstancePrefix           string
-	TokenSource                  oauth2.TokenSource
-	UseMetadataServer            bool
-	AlphaFeatureGate             *AlphaFeatureGate
-	StackType                    string
-	ExternalInstanceGroupsPrefix string
+	SecondaryRangeName      string
+	NodeTags                []string
+	NodeInstancePrefix      string
+	TokenSource             oauth2.TokenSource
+	UseMetadataServer       bool
+	AlphaFeatureGate        *AlphaFeatureGate
+	StackType               string
+	FirewallRulesManagement string
 }
 
 func init() {
@@ -478,7 +473,13 @@ func GenerateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 		cloudConfig.NodeTags = configFile.Global.NodeTags
 		cloudConfig.NodeInstancePrefix = configFile.Global.NodeInstancePrefix
 		cloudConfig.AlphaFeatureGate = NewAlphaFeatureGate(configFile.Global.AlphaFeatures)
-		cloudConfig.ExternalInstanceGroupsPrefix = configFile.Global.ExternalInstanceGroupsPrefix
+		switch m := FirewallRulesManagement(configFile.Global.FirewallRulesManagement); m {
+		case "", firewallRulesManagementEnabled, firewallRulesManagementDisabled:
+			cloudConfig.FirewallRulesManagement = string(m)
+		default:
+			return nil, fmt.Errorf("invalid firewall-rules-management %q: must be %q or %q",
+				m, firewallRulesManagementEnabled, firewallRulesManagementDisabled)
+		}
 	}
 
 	// retrieve projectID and zone
@@ -635,15 +636,23 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 	}
 	serviceAlpha.UserAgent = userAgent
 
+	servicePreview, err := computepreview.NewService(context.Background(), clientOpts...)
+	if err != nil {
+		return nil, err
+	}
+	servicePreview.UserAgent = userAgent
+
 	if config.APIEndpoint != "" {
 		if strings.HasSuffix(service.BasePath, "/projects/") {
 			service.BasePath = getProjectsBasePath(config.APIEndpoint)
 			serviceBeta.BasePath = getProjectsBasePath(strings.Replace(config.APIEndpoint, "v1", "beta", -1))
 			serviceAlpha.BasePath = getProjectsBasePath(strings.Replace(config.APIEndpoint, "v1", "alpha", -1))
+			servicePreview.BasePath = getProjectsBasePath(config.APIEndpoint)
 		} else {
 			service.BasePath = config.APIEndpoint
 			serviceBeta.BasePath = strings.Replace(config.APIEndpoint, "v1", "beta", -1)
 			serviceAlpha.BasePath = strings.Replace(config.APIEndpoint, "v1", "alpha", -1)
+			servicePreview.BasePath = config.APIEndpoint
 		}
 	}
 
@@ -693,35 +702,37 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 	operationPollRateLimiter := flowcontrol.NewTokenBucketRateLimiter(5, 5) // 5 qps, 5 burst.
 
 	gce := &Cloud{
-		service:                      service,
-		serviceAlpha:                 serviceAlpha,
-		serviceBeta:                  serviceBeta,
-		containerService:             containerService,
-		tpuService:                   tpuService,
-		projectID:                    projID,
-		networkProjectID:             netProjID,
-		onXPN:                        onXPN,
-		region:                       config.Region,
-		regional:                     config.Regional,
-		localZone:                    config.Zone,
-		dynamicZones:                 dynamicZones,
-		networkURL:                   networkURL,
-		unsafeIsLegacyNetwork:        isLegacyNetwork,
-		unsafeSubnetworkURL:          subnetURL,
-		secondaryRangeName:           config.SecondaryRangeName,
-		nodeTags:                     config.NodeTags,
-		nodeInstancePrefix:           config.NodeInstancePrefix,
-		useMetadataServer:            config.UseMetadataServer,
-		operationPollRateLimiter:     operationPollRateLimiter,
-		AlphaFeatureGate:             config.AlphaFeatureGate,
-		nodeZones:                    map[string]sets.String{},
-		metricsCollector:             newLoadBalancerMetrics(),
-		projectsBasePath:             getProjectsBasePath(service.BasePath),
-		stackType:                    StackType(config.StackType),
-		externalInstanceGroupsPrefix: config.ExternalInstanceGroupsPrefix,
+		service:                  service,
+		serviceAlpha:             serviceAlpha,
+		serviceBeta:              serviceBeta,
+		servicePreview:           servicePreview,
+		containerService:         containerService,
+		tpuService:               tpuService,
+		projectID:                projID,
+		networkProjectID:         netProjID,
+		onXPN:                    onXPN,
+		region:                   config.Region,
+		regional:                 config.Regional,
+		localZone:                config.Zone,
+		dynamicZones:             dynamicZones,
+		networkURL:               networkURL,
+		unsafeIsLegacyNetwork:    isLegacyNetwork,
+		unsafeSubnetworkURL:      subnetURL,
+		secondaryRangeName:       config.SecondaryRangeName,
+		nodeTags:                 config.NodeTags,
+		nodeInstancePrefix:       config.NodeInstancePrefix,
+		useMetadataServer:        config.UseMetadataServer,
+		operationPollRateLimiter: operationPollRateLimiter,
+		AlphaFeatureGate:         config.AlphaFeatureGate,
+		nodeZones:                map[string]sets.String{},
+		metricsCollector:         newLoadBalancerMetrics(),
+		projectsBasePath:         getProjectsBasePath(service.BasePath),
+		stackType:                StackType(config.StackType),
+		firewallRulesManagement:  FirewallRulesManagement(config.FirewallRulesManagement),
 	}
 
 	gce.manager = &gceServiceManager{gce}
+	gce.aneService = &gceANEService{gce: gce}
 	gce.s = &cloud.Service{
 		GA:            service,
 		Alpha:         serviceAlpha,
