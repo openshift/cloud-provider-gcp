@@ -23,6 +23,8 @@ import (
 )
 
 func runCni() {
+	// TODO: Add a fallback path where if the daemon is not available, the plugin
+	// allocates IPs locally.
 	plugin := cni.NewPlugin()
 
 	skel.PluginMainFuncs(

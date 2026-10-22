@@ -5,6 +5,7 @@
 // license that can be found in the LICENSE file.
 
 //go:build sqlite_foreign_keys
+// +build sqlite_foreign_keys
 
 package sqlite3
 

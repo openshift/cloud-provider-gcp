@@ -159,7 +159,7 @@ func convertAssign(dest, src any) error {
 	}
 
 	dpv := reflect.ValueOf(dest)
-	if dpv.Kind() != reflect.Pointer {
+	if dpv.Kind() != reflect.Ptr {
 		return errors.New("destination not a pointer")
 	}
 	if dpv.IsNil() {
@@ -192,7 +192,7 @@ func convertAssign(dest, src any) error {
 	// This also allows scanning into user defined types such as "type Int int64".
 	// For symmetry, also check for string destination types.
 	switch dv.Kind() {
-	case reflect.Pointer:
+	case reflect.Ptr:
 		if src == nil {
 			dv.Set(reflect.Zero(dv.Type()))
 			return nil

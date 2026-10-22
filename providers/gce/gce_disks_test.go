@@ -21,12 +21,10 @@ package gce
 
 import (
 	"context"
-	"fmt"
-	"net/http"
 	"testing"
 
-	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
-	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
+	"fmt"
+
 	computealpha "google.golang.org/api/compute/v0.alpha"
 	computebeta "google.golang.org/api/compute/v0.beta"
 	compute "google.golang.org/api/compute/v1"
@@ -34,6 +32,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+	cloudprovider "k8s.io/cloud-provider"
 )
 
 // TODO TODO write a test for GetDiskByNameUnknownZone and make sure casting logic works
@@ -917,7 +916,7 @@ func (manager *FakeServiceManager) GetDiskFromCloudProvider(
 	zone string, diskName string) (*Disk, error) {
 
 	if manager.zonalDisks[zone] == "" {
-		return nil, &googleapi.Error{Code: http.StatusNotFound}
+		return nil, cloudprovider.DiskNotFound
 	}
 
 	if manager.resourceInUse {
@@ -942,7 +941,7 @@ func (manager *FakeServiceManager) GetRegionalDiskFromCloudProvider(
 	diskName string) (*Disk, error) {
 
 	if _, ok := manager.regionalDisks[diskName]; !ok {
-		return nil, &googleapi.Error{Code: http.StatusNotFound}
+		return nil, cloudprovider.DiskNotFound
 	}
 
 	if manager.resourceInUse {
@@ -1019,43 +1018,4 @@ func createNodeZones(zones []string) map[string]sets.String {
 		nodeZones[zone] = sets.NewString("dummynode")
 	}
 	return nodeZones
-}
-
-func TestGetDiskByNameUnknownZone_DynamicRefresh(t *testing.T) {
-	gceProjectID := "test-project"
-	gceRegion := "us-central1"
-	fakeManager := newFakeManager(gceProjectID, gceRegion)
-	fakeManager.zonalDisks["us-central1-c"] = "my-disk"
-
-	gce := Cloud{
-		manager:      fakeManager,
-		managedZones: []string{"us-central1-b"},
-		projectID:    gceProjectID,
-		region:       gceRegion,
-		dynamicZones: true,
-	}
-
-	mockGCE := cloud.NewMockGCE(&gceProjectRouter{&gce})
-	keyC := meta.GlobalKey("key-c")
-	mockGCE.MockZones.Objects[*keyC] = &cloud.MockZonesObj{
-		Obj: &compute.Zone{Name: "us-central1-c", Region: gce.getRegionLink("us-central1")},
-	}
-	keyB := meta.GlobalKey("key-b")
-	mockGCE.MockZones.Objects[*keyB] = &cloud.MockZonesObj{
-		Obj: &compute.Zone{Name: "us-central1-b", Region: gce.getRegionLink("us-central1")},
-	}
-	gce.c = mockGCE
-
-	disk, err := gce.GetDiskByNameUnknownZone("my-disk")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if disk == nil || disk.Name != "my-disk" {
-		t.Fatalf("expected disk my-disk, got %v", disk)
-	}
-
-	expectedZones := []string{"us-central1-b", "us-central1-c"}
-	if !sets.NewString(gce.getManagedZones()...).Equal(sets.NewString(expectedZones...)) {
-		t.Fatalf("expected managed zones %v, got %v", expectedZones, gce.getManagedZones())
-	}
 }

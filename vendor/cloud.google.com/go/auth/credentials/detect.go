@@ -27,7 +27,7 @@ import (
 	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/internal"
 	"cloud.google.com/go/auth/internal/credsfile"
-	"cloud.google.com/go/auth/internal/regionalaccessboundary"
+	"cloud.google.com/go/auth/internal/trustboundary"
 	"cloud.google.com/go/compute/metadata"
 	"github.com/googleapis/gax-go/v2/internallog"
 )
@@ -138,15 +138,11 @@ func OnGCE() bool {
 // Google APIs can compromise the security of your systems and data. For
 // more information, refer to [Validate credential configurations from
 // external sources](https://cloud.google.com/docs/authentication/external/externally-sourced-credentials).
-//
-// Note: If the detected credential configuration file contains a
-// `service_account_impersonation_url` field, the returned credentials will
-// yield tokens that are already impersonated to that target service account.
 func DetectDefault(opts *DetectOptions) (*auth.Credentials, error) {
 	if err := opts.validate(); err != nil {
 		return nil, err
 	}
-	regionalAccessBoundaryEnabled, err := regionalaccessboundary.IsEnabled()
+	trustBoundaryEnabled, err := trustboundary.IsEnabled()
 	if err != nil {
 		return nil, err
 	}
@@ -179,12 +175,12 @@ func DetectDefault(opts *DetectOptions) (*auth.Credentials, error) {
 		}
 
 		tp := computeTokenProvider(opts, metadataClient)
-		if regionalAccessBoundaryEnabled {
-			gceConfigProvider := regionalaccessboundary.NewGCEConfigProvider(gceUniverseDomainProvider)
+		if trustBoundaryEnabled {
+			gceConfigProvider := trustboundary.NewGCEConfigProvider(gceUniverseDomainProvider)
 			var err error
-			tp, err = regionalaccessboundary.NewProvider(opts.client(), gceConfigProvider, opts.logger(), tp)
+			tp, err = trustboundary.NewProvider(opts.client(), gceConfigProvider, opts.logger(), tp)
 			if err != nil {
-				return nil, fmt.Errorf("credentials: failed to initialize GCE Regional Access Boundary provider: %w", err)
+				return nil, fmt.Errorf("credentials: failed to initialize GCE trust boundary provider: %w", err)
 			}
 
 		}

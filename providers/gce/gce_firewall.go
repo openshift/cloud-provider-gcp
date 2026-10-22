@@ -20,18 +20,10 @@ limitations under the License.
 package gce
 
 import (
-	"errors"
-
 	compute "google.golang.org/api/compute/v1"
 
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
-)
-
-var (
-	// ErrFirewallManagementDisabled is returned when a firewall operation
-	// is attempted but firewall rules management has been disabled.
-	ErrFirewallManagementDisabled = errors.New("firewall rules management is disabled")
 )
 
 func newFirewallMetricContext(request string) *metricContext {
@@ -41,7 +33,7 @@ func newFirewallMetricContext(request string) *metricContext {
 // GetFirewall returns the Firewall by name.
 func (g *Cloud) GetFirewall(name string) (*compute.Firewall, error) {
 	if g.firewallRulesManagement == firewallRulesManagementDisabled {
-		return nil, ErrFirewallManagementDisabled
+		return nil, nil
 	}
 
 	ctx, cancel := cloud.ContextWithCallTimeout()

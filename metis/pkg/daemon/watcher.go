@@ -103,7 +103,7 @@ func NewWatcher(cfg WatcherConfig) *Watcher {
 	// nncInformer is never nil. This is for UT.
 	if cfg.NNCInformer != nil {
 		cfg.NNCInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj any) {
+			AddFunc: func(obj interface{}) {
 				nnc, ok := obj.(*nncv1.NodeNetworkConfig)
 				if !ok {
 					return
@@ -114,7 +114,7 @@ func NewWatcher(cfg WatcherConfig) *Watcher {
 					}
 				}
 			},
-			UpdateFunc: func(oldObj, newObj any) {
+			UpdateFunc: func(oldObj, newObj interface{}) {
 				oldNNC, ok1 := oldObj.(*nncv1.NodeNetworkConfig)
 				newNNC, ok2 := newObj.(*nncv1.NodeNetworkConfig)
 				if !ok1 || !ok2 {
@@ -187,7 +187,7 @@ func (w *Watcher) processNextWorkItem(ctx context.Context) bool {
 }
 
 func (w *Watcher) syncCIDR(ctx context.Context, network string) error {
-	w.logger.V(4).Info("Daemon watcher starting synchronization: reconciling CIDR blocks with NodeNetworkConfig status", "node", w.nodeName, "network", network)
+	w.logger.Info("Daemon watcher starting synchronization: reconciling CIDR blocks with NodeNetworkConfig status", "node", w.nodeName, "network", network)
 
 	nnc, err := getNodeNetworkConfig(ctx, w.nncLister, w.nncClient, w.nodeName)
 	if err != nil {
@@ -202,7 +202,7 @@ func (w *Watcher) syncCIDR(ctx context.Context, network string) error {
 		return err
 	}
 
-	w.logger.V(4).Info("Daemon watcher synchronization done", "node", w.nodeName, "network", network)
+	w.logger.Info("Daemon watcher synchronization done", "node", w.nodeName, "network", network)
 	return nil
 }
 
@@ -239,10 +239,8 @@ func (w *Watcher) addCIDR(ctx context.Context, nnc *nncv1.NodeNetworkConfig, net
 			continue
 		}
 
-		// Default to reusable (true) if ReusePolicy is empty or explicitly set to "Reusable"
-		reusable := podCIDR.ReusePolicy != nncv1.PodCIDRTypeNonReusable
-		w.logger.Info("Watcher adding new ready podCIDR to local DB", "cidr", podCIDR.CIDR, "network", podCIDR.Network, "availableIPs", availableIPs, "reusable", reusable)
-		err = w.store.AddCIDR(ctx, podCIDR.Network, podCIDR.CIDR, store.WithReusable(reusable))
+		w.logger.Info("Watcher adding new ready podCIDR to local DB", "cidr", podCIDR.CIDR, "network", podCIDR.Network, "availableIPs", availableIPs)
+		err = w.store.AddCIDR(ctx, podCIDR.Network, podCIDR.CIDR)
 		if err == nil {
 			if w.OnCIDRAdded != nil {
 				w.OnCIDRAdded(podCIDR.Network, availableIPs)
@@ -265,7 +263,7 @@ func (w *Watcher) maybeDeleteCIDRs(ctx context.Context, nnc *nncv1.NodeNetworkCo
 	}
 
 	// Create a map for quick lookup of CIDRs in NNC status for the current network
-	statusCIDRs := map[string]bool{}
+	statusCIDRs := make(map[string]bool)
 	for _, podCIDR := range nnc.Status.PodCIDRs {
 		if podCIDR.Network == network {
 			statusCIDRs[podCIDR.CIDR] = true

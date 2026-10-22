@@ -35,7 +35,7 @@ func newInstallCommand() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "install",
 		Short: "Install metis CNI binary to the host CNI path",
-		RunE: func(_ *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := opts.validate(); err != nil {
 				return err
 			}
@@ -92,7 +92,7 @@ func runInstallWithOptions(opts *installOptions) error {
 	}
 	// Clean up the temporary file if the swap sequence fails or is aborted.
 	defer func() {
-		_ = dst.Close()
+		dst.Close()
 		_ = os.Remove(destTempPath)
 	}()
 

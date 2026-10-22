@@ -1,4 +1,3 @@
-// Package mtcontext provides context values for multitenancy.
 package mtcontext
 
 import (
