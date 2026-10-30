@@ -677,6 +677,11 @@ func TestUpdateInternalLoadBalancerNodes(t *testing.T) {
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	// This test places a node in SecondaryZoneName. On a real cluster the
+	// installer always sets regional=true, so managedZones covers every zone in
+	// the region and node zones are always a subset of it. The fake defaults to
+	// the local zone only, so widen it to match production.
+	gce.managedZones = []string{vals.ZoneName, vals.SecondaryZoneName}
 	node1Name := []string{"test-node-1"}
 
 	svc := fakeLoadbalancerService(string(LBTypeInternal))
@@ -1160,6 +1165,8 @@ func TestEnsureInternalInstanceGroupsReuseGroups(t *testing.T) {
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	// Instance-group reuse spans zones, so manage both.
+	gce.managedZones = []string{vals.ZoneName, vals.SecondaryZoneName}
 	gce.externalInstanceGroupsPrefix = "pre-existing"
 
 	igName := makeInstanceGroupName(vals.ClusterID)
