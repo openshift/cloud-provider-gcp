@@ -138,6 +138,8 @@ func TestFilterNodesWithExistingExternalInstanceGroups(t *testing.T) {
 		t.Helper()
 		gce, err := fakeGCECloud(vals)
 		require.NoError(t, err)
+		// Instance-group reuse spans zones, so manage both.
+		gce.managedZones = []string{vals.ZoneName, vals.SecondaryZoneName}
 		gce.nodeInstancePrefix = testInfraName
 		gce.externalInstanceGroupsPrefix = prefix
 
@@ -313,6 +315,8 @@ func TestEvaluateExternalInstanceGroup(t *testing.T) {
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	// Instance-group reuse spans zones, so manage both.
+	gce.managedZones = []string{vals.ZoneName, vals.SecondaryZoneName}
 	gce.nodeInstancePrefix = testInfraName
 	zone := vals.ZoneName
 
@@ -359,6 +363,8 @@ func TestFilterNodesWithExistingExternalInstanceGroups_FQDNNodes(t *testing.T) {
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	// Instance-group reuse spans zones, so manage both.
+	gce.managedZones = []string{vals.ZoneName, vals.SecondaryZoneName}
 
 	// Both prefixes are the infra name, matching real cloud config
 	gce.nodeInstancePrefix = testInfraName

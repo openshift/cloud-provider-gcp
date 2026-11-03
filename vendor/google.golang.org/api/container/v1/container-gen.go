@@ -542,8 +542,9 @@ type AddonsConfig struct {
 	// NodeReadinessConfig: Optional. Configuration for NodeReadinessController
 	// add-on.
 	NodeReadinessConfig *NodeReadinessConfig `json:"nodeReadinessConfig,omitempty"`
-	// ParallelstoreCsiDriverConfig: Configuration for the Cloud Storage
-	// Parallelstore CSI driver.
+	// ParallelstoreCsiDriverConfig: Deprecated: The Parallelstore CSI driver is no
+	// longer supported. Configuration for the Cloud Storage Parallelstore CSI
+	// driver.
 	ParallelstoreCsiDriverConfig *ParallelstoreCsiDriverConfig `json:"parallelstoreCsiDriverConfig,omitempty"`
 	// PodSnapshotConfig: Optional. Configuration for the Pod Snapshot feature.
 	PodSnapshotConfig *PodSnapshotConfig `json:"podSnapshotConfig,omitempty"`
@@ -1472,7 +1473,7 @@ type Cluster struct {
 	// ControlPlaneEndpointsConfig: Configuration for all cluster's control plane
 	// endpoints.
 	ControlPlaneEndpointsConfig *ControlPlaneEndpointsConfig `json:"controlPlaneEndpointsConfig,omitempty"`
-	// CostManagementConfig: Configuration for the fine-grained cost management
+	// CostManagementConfig: Configuration for the fine-grained cost allocation
 	// feature.
 	CostManagementConfig *CostManagementConfig `json:"costManagementConfig,omitempty"`
 	// CreateTime: Output only. The time the cluster was created, in RFC3339
@@ -1942,7 +1943,7 @@ type ClusterUpdate struct {
 	// DesiredControlPlaneEndpointsConfig: Control plane endpoints configuration.
 	DesiredControlPlaneEndpointsConfig *ControlPlaneEndpointsConfig `json:"desiredControlPlaneEndpointsConfig,omitempty"`
 	// DesiredCostManagementConfig: The desired configuration for the fine-grained
-	// cost management feature.
+	// cost allocation feature.
 	DesiredCostManagementConfig *CostManagementConfig `json:"desiredCostManagementConfig,omitempty"`
 	// DesiredDatabaseEncryption: Configuration of etcd encryption.
 	DesiredDatabaseEncryption *DatabaseEncryption `json:"desiredDatabaseEncryption,omitempty"`
@@ -2586,7 +2587,7 @@ func (s ControlPlaneEndpointsConfig) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
-// CostManagementConfig: Configuration for fine-grained cost management
+// CostManagementConfig: Configuration for fine-grained cost allocation
 // feature.
 type CostManagementConfig struct {
 	// Enabled: Whether the feature is enabled or not.
@@ -5863,8 +5864,9 @@ type NodeConfig struct {
 	// ContainerdConfig: Parameters for containerd customization.
 	ContainerdConfig *ContainerdConfig `json:"containerdConfig,omitempty"`
 	// DiskSizeGb: Size of the disk attached to each node, specified in GB. The
-	// smallest allowed disk size is 10GB. If unspecified, the default disk size is
-	// 100GB.
+	// smallest allowed disk size is 15 GB for node pools running GKE versions
+	// 1.36.3-gke.1480000 or later. Or, for earlier versions, the smallest allowed
+	// disk size is 12 GB. If unspecified, the default disk size is 100GB.
 	DiskSizeGb int64 `json:"diskSizeGb,omitempty"`
 	// DiskType: Type of the disk attached to each node (e.g. 'pd-standard',
 	// 'pd-ssd' or 'pd-balanced') If unspecified, the default disk type is
@@ -6304,6 +6306,9 @@ type NodeKubeletConfig struct {
 	// Controls the maximum number of processes allowed to run in a pod. The value
 	// must be greater than or equal to 1024 and less than 4194304.
 	PodPidsLimit int64 `json:"podPidsLimit,omitempty,string"`
+	// ReservedResourcesConfig: Optional. Controls the reserved resources on the
+	// node. Only included if any fields are specified.
+	ReservedResourcesConfig *ReservedResourcesConfig `json:"reservedResourcesConfig,omitempty"`
 	// ShutdownGracePeriodCriticalPodsSeconds: Optional.
 	// shutdown_grace_period_critical_pods_seconds is the maximum allowed grace
 	// period (in seconds) used to terminate critical pods during a node shutdown.
@@ -7219,8 +7224,9 @@ func (s OperationProgress) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
-// ParallelstoreCsiDriverConfig: Configuration for the Cloud Storage
-// Parallelstore CSI driver.
+// ParallelstoreCsiDriverConfig: Deprecated: The Parallelstore CSI driver is no
+// longer supported. Configuration for the Cloud Storage Parallelstore CSI
+// driver.
 type ParallelstoreCsiDriverConfig struct {
 	// Enabled: Whether the Cloud Storage Parallelstore CSI driver is enabled for
 	// this cluster.
@@ -7938,9 +7944,13 @@ type ReleaseChannelConfig struct {
 	// availability for versions which are known to be stable and reliable in
 	// production.
 	Channel string `json:"channel,omitempty"`
+	// CustomVersions: Output only. List of custom versions for the channel.
+	CustomVersions []string `json:"customVersions,omitempty"`
 	// DefaultVersion: The default version for newly created clusters on the
 	// channel.
 	DefaultVersion string `json:"defaultVersion,omitempty"`
+	// PreviewVersions: Output only. List of preview versions for the channel.
+	PreviewVersions []string `json:"previewVersions,omitempty"`
 	// UpgradeTargetVersion: The auto upgrade target version for clusters on the
 	// channel.
 	UpgradeTargetVersion string `json:"upgradeTargetVersion,omitempty"`
@@ -8002,6 +8012,43 @@ type ReservationAffinity struct {
 
 func (s ReservationAffinity) MarshalJSON() ([]byte, error) {
 	type NoMethod ReservationAffinity
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
+}
+
+// ReservedResourcesConfig: ReservedResourcesConfig contains the configuration
+// for the reserved resources on the node.
+type ReservedResourcesConfig struct {
+	// CpuReservedMillicore: Optional. The amount of CPU to reserve for system
+	// daemons. This is a user-specified value. If unspecified, GKE decides the
+	// default based on node version using different formula.
+	CpuReservedMillicore int64 `json:"cpuReservedMillicore,omitempty,string"`
+	// EffectiveCpuReservedMillicore: Output only. The effective amount of CPU
+	// reserved for system daemons. If `cpu_reserved_millicore` is specified,
+	// user-specified value is used. Otherwise the GKE default is applied.
+	EffectiveCpuReservedMillicore int64 `json:"effectiveCpuReservedMillicore,omitempty,string"`
+	// EffectiveMemoryReservedMib: Output only. The effective amount of memory
+	// reserved for system daemons. If `memory_reserved_mib` is specified, the
+	// user-specified value is used. Otherwise the GKE default is applied.
+	EffectiveMemoryReservedMib int64 `json:"effectiveMemoryReservedMib,omitempty,string"`
+	// MemoryReservedMib: Optional. The amount of memory to reserve for system
+	// daemons (in MiB). This is a user-specified value. If unspecified, GKE
+	// decides the default based on node version using different formula.
+	MemoryReservedMib int64 `json:"memoryReservedMib,omitempty,string"`
+	// ForceSendFields is a list of field names (e.g. "CpuReservedMillicore") to
+	// unconditionally include in API requests. By default, fields with empty or
+	// default values are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-ForceSendFields for more
+	// details.
+	ForceSendFields []string `json:"-"`
+	// NullFields is a list of field names (e.g. "CpuReservedMillicore") to include
+	// in API requests with the JSON null value. By default, fields with empty
+	// values are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-NullFields for more details.
+	NullFields []string `json:"-"`
+}
+
+func (s ReservedResourcesConfig) MarshalJSON() ([]byte, error) {
+	type NoMethod ReservedResourcesConfig
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
@@ -8254,6 +8301,7 @@ type SandboxConfig struct {
 	// Possible values:
 	//   "UNSPECIFIED" - Default value. This should not be used.
 	//   "GVISOR" - Run sandbox using gvisor.
+	//   "MICROVM" - Run sandbox using MicroVM.
 	Type string `json:"type,omitempty"`
 	// ForceSendFields is a list of field names (e.g. "Type") to unconditionally
 	// include in API requests. By default, fields with empty or default values are
