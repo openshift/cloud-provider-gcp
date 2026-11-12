@@ -502,7 +502,7 @@ type ProjectsLocationsWasmPluginsVersionsService struct {
 // AgentConnectivityTemplate: AgentConnectivityTemplate represents a reusable
 // network configuration.
 type AgentConnectivityTemplate struct {
-	// AccessPath: Required. Immutable. The path of the access. Maps roughly to
+	// AccessPath: Optional. Immutable. The path of the access. Maps roughly to
 	// ingress/egress, though we keep CLIENT_TO_AGENT and AGENT_TO_ANYWHERE as
 	// carryovers from Agent Gateway's original resource model. The path is
 	// immutable once set. Exactly one path can be set.
@@ -532,7 +532,7 @@ type AgentConnectivityTemplate struct {
 	AgentCompute string `json:"agentCompute,omitempty"`
 	// CreateTime: Output only. The timestamp when the resource was created.
 	CreateTime string `json:"createTime,omitempty"`
-	// DeploymentModel: Required. The deployment model for the gateway.
+	// DeploymentModel: Optional. The deployment model for the gateway.
 	//
 	// Possible values:
 	//   "DEPLOYMENT_MODEL_UNSPECIFIED" - Unspecified deployment model.
@@ -1468,9 +1468,7 @@ type ExtensionBinding struct {
 	// `projects/{project}/locations/{location}/extensionBindings/{extension_binding
 	// }`.
 	Name string `json:"name,omitempty"`
-	// Priority: Optional. Priority of the extension binding. Lower numbers
-	// indicate higher priority. The priority determines the order in which
-	// extension bindings are applied to a request.
+	// Priority: Optional. This field is not supported.
 	Priority int64 `json:"priority,omitempty"`
 	// ProducerExtension: Required. The name of the extension that this binding
 	// should attach to target resources. Format: For Google-provided extensions,
@@ -1767,9 +1765,9 @@ func (s ExtensionBindingTargetScope) MarshalJSON() ([]byte, error) {
 type ExtensionChain struct {
 	// Extensions: Required. A set of extensions to execute for the matching
 	// request. At least one extension is required. Up to 3 extensions can be
-	// defined for each extension chain for `LbTrafficExtension` resource.
-	// `LbRouteExtension`, `LbEdgeExtension`, and `LbTcpExtension` chains are
-	// limited to 1 extension per extension chain.
+	// defined for each extension chain for `LbTrafficExtension` and
+	// `CdnEdgeExtension` resources. `LbRouteExtension`, `LbEdgeExtension`, and
+	// `LbTcpExtension` chains are limited to 1 extension per extension chain.
 	Extensions []*ExtensionChainExtension `json:"extensions,omitempty"`
 	// MatchCondition: Required. Conditions under which this chain is invoked for a
 	// request.
@@ -1923,8 +1921,8 @@ type ExtensionChainExtension struct {
 	// `projects/{project}/locations/{location}/wasmPlugins/{plugin}` or
 	// `//networkservices.googleapis.com/projects/{project}/locations/{location}/was
 	// mPlugins/{wasmPlugin}`. Plugin extensions are currently supported for the
-	// `LbTrafficExtension`, the `LbRouteExtension`, and the `LbEdgeExtension`
-	// resources.
+	// `LbTrafficExtension`, the `LbRouteExtension`, the `LbEdgeExtension`, and the
+	// `CdnEdgeExtension` resources.
 	Service string `json:"service,omitempty"`
 	// SupportedEvents: Optional. A set of events during request or response
 	// processing for which this extension is called. For the `LbTrafficExtension`
@@ -5035,8 +5033,7 @@ type ProducerExtensionExtensionSettings struct {
 	// Authority: Optional. The `:authority` header in the request sent to the
 	// extension service.
 	Authority string `json:"authority,omitempty"`
-	// ObservabilityMode: Optional. Whether the extension should function in
-	// observability mode.
+	// ObservabilityMode: Optional. This field is not supported.
 	ObservabilityMode bool `json:"observabilityMode,omitempty"`
 	// Service: Required. URI of the PSC attachment.
 	Service string `json:"service,omitempty"`
@@ -5147,8 +5144,9 @@ func (s ServiceBinding) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
-// ServiceLbPolicy: ServiceLbPolicy holds global load balancing and traffic
-// distribution configuration that can be applied to a BackendService.
+// ServiceLbPolicy: ServiceLbPolicy holds load balancing and traffic
+// distribution configuration that can be applied to a global or regional
+// BackendService.
 type ServiceLbPolicy struct {
 	// AutoCapacityDrain: Optional. Configuration to automatically move traffic
 	// away for unhealthy IG/NEG for the associated Backend Service.
@@ -5173,16 +5171,23 @@ type ServiceLbPolicy struct {
 	//   "LOAD_BALANCING_ALGORITHM_UNSPECIFIED" - The type of the loadbalancing
 	// algorithm is unspecified.
 	//   "SPRAY_TO_WORLD" - Balance traffic across all backends across the world
-	// proportionally based on capacity.
+	// proportionally based on capacity. Only supported for global ServiceLbPolicy
+	// with Cloud Service Mesh, not supported for regional ServiceLbPolicy.
 	//   "SPRAY_TO_REGION" - Direct traffic to the nearest region with endpoints
 	// and capacity before spilling over to other regions and spread the traffic
-	// from each client to all the MIGs/NEGs in a region.
+	// from each client to all the MIGs/NEGs in a region. For regional
+	// ServiceLbPolicy, traffic stays within the configured region and does not
+	// spill over to other regions.
 	//   "WATERFALL_BY_REGION" - Direct traffic to the nearest region with
 	// endpoints and capacity before spilling over to other regions. All MIGs/NEGs
 	// within a region are evenly loaded but each client might not spread the
-	// traffic to all the MIGs/NEGs in the region.
+	// traffic to all the MIGs/NEGs in the region. For regional ServiceLbPolicy,
+	// traffic stays within the configured region and does not spill over to other
+	// regions.
 	//   "WATERFALL_BY_ZONE" - Attempt to keep traffic in a single zone closest to
-	// the client, before spilling over to other zones.
+	// the client, before spilling over to other zones. For regional
+	// ServiceLbPolicy, traffic only spills over to other zones within the same
+	// region.
 	LoadBalancingAlgorithm string `json:"loadBalancingAlgorithm,omitempty"`
 	// Name: Identifier. Name of the ServiceLbPolicy resource. It matches pattern
 	// `projects/{project}/locations/{location}/serviceLbPolicies/{service_lb_policy
@@ -5212,7 +5217,7 @@ func (s ServiceLbPolicy) MarshalJSON() ([]byte, error) {
 }
 
 // ServiceLbPolicyAutoCapacityDrain: Option to specify if an unhealthy IG/NEG
-// should be considered for global load balancing and traffic routing.
+// should be considered for load balancing and traffic routing.
 type ServiceLbPolicyAutoCapacityDrain struct {
 	// Enable: Optional. If set to 'True', an unhealthy IG/NEG will be set as
 	// drained. - An IG/NEG is considered unhealthy if less than 25% of the
@@ -5871,8 +5876,8 @@ type WasmPluginLogConfig struct {
 	Enable bool `json:"enable,omitempty"`
 	// MinLogLevel: Optional. Non-empty default. Specifies the lowest level of the
 	// plugin logs that are exported to Cloud Logging. This setting relates to the
-	// logs generated by using logging statements in your Wasm code. This field is
-	// can be set only if logging is enabled for the plugin. If the field is not
+	// logs generated by using logging statements in your Wasm code. This field can
+	// be set only if logging is enabled for the plugin. If the field is not
 	// provided when logging is enabled, it is set to `INFO` by default.
 	//
 	// Possible values:
