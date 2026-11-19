@@ -37,7 +37,6 @@ import (
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/meta"
 	"github.com/GoogleCloudPlatform/k8s-cloud-provider/pkg/cloud/mock"
-	"google.golang.org/api/googleapi"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -578,9 +577,10 @@ func TestEnsureExternalLoadBalancerReconcilesForwardingRuleLabelsAcrossNoopClear
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 
 	svc := fakeLoadbalancerService("")
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = "a=b"
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = "a=b"
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 	require.NoError(t, err)
 	nodes, err := createAndInsertNodes(gce, []string{"test-node-1"}, vals.ZoneName)
@@ -624,7 +624,8 @@ func TestEnsureExternalLoadBalancerReconcilesForwardingRuleLabelsAcrossNoopClear
 	assert.Zero(t, deleteCalls)
 
 	// An empty annotation clears the existing labels with the fingerprint from the prior update.
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = ""
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = ""
+	persistDesiredForwardingRuleLabels(t, gce, svc)
 	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
 	require.NoError(t, err)
 	require.Len(t, setLabelsRequests, 2)
@@ -632,7 +633,8 @@ func TestEnsureExternalLoadBalancerReconcilesForwardingRuleLabelsAcrossNoopClear
 	assert.Equal(t, "label-fingerprint-1", setLabelsRequests[1].LabelFingerprint)
 
 	// A forwarding-rule update recreates it and then reapplies labels using the replacement rule's fingerprint.
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = "c=d"
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = "c=d"
+	persistDesiredForwardingRuleLabels(t, gce, svc)
 	svc.Spec.Ports[0].Port++
 	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
 	require.NoError(t, err)
@@ -647,9 +649,10 @@ func TestEnsureExternalLoadBalancerRejectsMalformedForwardingRuleLabelsBeforeCre
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 
 	svc := fakeLoadbalancerService("")
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = "malformed"
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = "malformed"
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -670,10 +673,11 @@ func TestEnsureExternalLoadBalancerCompletesResourcesBeforeReturningForwardingRu
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 	gce.enableL4DenyFirewallRule = true
 
 	svc := fakeLoadbalancerService("")
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = "goog-partner-solution=openshift"
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = "goog-partner-solution=openshift"
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -697,6 +701,7 @@ func TestEnsureExternalLoadBalancerLeavesLabelsUnmanagedWithoutAnnotation(t *tes
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 
 	svc := fakeLoadbalancerService("")
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
@@ -718,9 +723,11 @@ func TestEnsureExternalLoadBalancerClearsForwardingRuleLabelsWithEmptyAnnotation
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 
 	svc := fakeLoadbalancerService("")
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = ""
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = ""
+	svc.Annotations[ServiceAnnotationManagedForwardingRuleLabelKeys] = "stale"
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
 	require.NoError(t, err)
 
@@ -749,6 +756,7 @@ func TestEnsureExternalLoadBalancerDoesNotSetForwardingRuleLabelsForNilLabelsAnd
 	vals := DefaultTestClusterValues()
 	gce, err := fakeGCECloud(vals)
 	require.NoError(t, err)
+	gce.SetEnableForwardingRuleLabels(true)
 
 	svc := fakeLoadbalancerService("")
 	svc, err = gce.client.CoreV1().Services(svc.Namespace).Create(context.TODO(), svc, metav1.CreateOptions{})
@@ -782,7 +790,8 @@ func TestEnsureExternalLoadBalancerDoesNotSetForwardingRuleLabelsForNilLabelsAnd
 	assert.Nil(t, fwdRule.Labels)
 
 	// An empty annotation is equal to nil labels and must not update or recreate the rule.
-	svc.Annotations[ServiceAnnotationLoadBalancerResourceLabels] = ""
+	svc.Annotations[ServiceAnnotationLoadBalancerForwardingRuleLabels] = ""
+	persistDesiredForwardingRuleLabels(t, gce, svc)
 	_, err = gce.ensureExternalLoadBalancer(vals.ClusterName, vals.ClusterID, svc, nil, nodes)
 	require.NoError(t, err)
 	assert.Zero(t, setLabelsCalls)
