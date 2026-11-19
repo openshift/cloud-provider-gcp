@@ -502,7 +502,7 @@ type ProjectsLocationsWasmPluginsVersionsService struct {
 // AgentConnectivityTemplate: AgentConnectivityTemplate represents a reusable
 // network configuration.
 type AgentConnectivityTemplate struct {
-	// AccessPath: Required. Immutable. The path of the access. Maps roughly to
+	// AccessPath: Optional. Immutable. The path of the access. Maps roughly to
 	// ingress/egress, though we keep CLIENT_TO_AGENT and AGENT_TO_ANYWHERE as
 	// carryovers from Agent Gateway's original resource model. The path is
 	// immutable once set. Exactly one path can be set.
@@ -532,7 +532,7 @@ type AgentConnectivityTemplate struct {
 	AgentCompute string `json:"agentCompute,omitempty"`
 	// CreateTime: Output only. The timestamp when the resource was created.
 	CreateTime string `json:"createTime,omitempty"`
-	// DeploymentModel: Required. The deployment model for the gateway.
+	// DeploymentModel: Optional. The deployment model for the gateway.
 	//
 	// Possible values:
 	//   "DEPLOYMENT_MODEL_UNSPECIFIED" - Unspecified deployment model.
@@ -949,21 +949,21 @@ type AuthzExtension struct {
 	// `projects/{project}/locations/{location}/authzExtensions/{authz_extension}`.
 	Name string `json:"name,omitempty"`
 	// Service: Required. The reference to the service that runs the extension. To
-	// configure a callout extension: For global AuthzExtension, `service` must be
-	// a fully-qualified reference to a backend service
+	// configure a callout extension: For a global AuthzExtension, `service` must
+	// be a fully qualified reference to a backend service
 	// (https://cloud.google.com/compute/docs/reference/rest/v1/backendServices) in
 	// the format:
 	// `https://www.googleapis.com/compute/v1/projects/{project}/global/backendServi
-	// ces/{backendService}`. For regional AuthzExtension, `service` must be a
-	// fully-qualified reference to one of the following: * a backend service
+	// ces/{backendService}`. For a regional AuthzExtension, `service` must be a
+	// fully qualified reference to one of the following: * A backend service
 	// (https://cloud.google.com/compute/docs/reference/rest/v1/backendServices) in
 	// the format:
 	// `https://www.googleapis.com/compute/v1/projects/{project}/regions/{region}/ba
-	// ckendServices/{backendService}`. * a fully qualified domain name that can be
-	// resolved by the Google Cloud DNS. * `iap.googleapis.com` and it can only be
-	// referenced by an AuthzPolicy with the policyProfile set to REQUEST_AUTHZ. *
+	// ckendServices/{backendService}`. * A fully qualified domain name that can be
+	// resolved by Cloud DNS. * `iap.googleapis.com` and can be referenced only by
+	// an `AuthzPolicy` with the `policyProfile` set to `REQUEST_AUTHZ`. *
 	// `modelarmor..rep.googleapis.com` and it can only be referenced by an
-	// AuthzPolicy with the policyProfile set to CONTENT_AUTHZ.
+	// `AuthzPolicy` with the `policyProfile` set to `CONTENT_AUTHZ`.
 	Service string `json:"service,omitempty"`
 	// Timeout: Required. Specifies the timeout for each individual message on the
 	// stream. The timeout must be between 10-10000 milliseconds.
@@ -1450,8 +1450,8 @@ type ExtensionBinding struct {
 	// request will fail with a 409 ABORTED error.
 	Etag string `json:"etag,omitempty"`
 	// FailOpen: Optional. Determines the behavior of the extension binding when
-	// the call to the extension fails or times out. Default value is `FALSE`. When
-	// set to `TRUE`, failures of the extension are silently ignored.
+	// the call to the extension fails or times out. Default value is `false`. When
+	// set to `true`, failures of the extension are silently ignored.
 	FailOpen bool `json:"failOpen,omitempty"`
 	// Labels: Optional. Set of labels associated with the `ExtensionBinding`
 	// resource. The format must comply with the following requirements
@@ -1468,12 +1468,10 @@ type ExtensionBinding struct {
 	// `projects/{project}/locations/{location}/extensionBindings/{extension_binding
 	// }`.
 	Name string `json:"name,omitempty"`
-	// Priority: Optional. Priority of the extension binding. Lower numbers
-	// indicate higher priority. The priority determines the order in which
-	// extension bindings are applied to a request.
+	// Priority: Optional. This field is not supported.
 	Priority int64 `json:"priority,omitempty"`
 	// ProducerExtension: Required. The name of the extension that this binding
-	// should attach to target resources. Format: For Google-provided extensions,
+	// should attach to target resources. Format: * For Google-provided extensions,
 	// specify the service endpoint, for example
 	// `modelarmor.us-central1.rep.googleapis.com`.
 	ProducerExtension string `json:"producerExtension,omitempty"`
@@ -1568,7 +1566,7 @@ type ExtensionBindingMatchConditionStringMatch struct {
 	// `xyz.abc.def`.
 	Contains string `json:"contains,omitempty"`
 	// Exact: Optional. The input string must match exactly the string specified
-	// here. Examples: * `abc` only matches the value `abc`.
+	// here. Examples: * `abc` matches only the value `abc`.
 	Exact string `json:"exact,omitempty"`
 	// IgnoreCase: Optional. If true, the `exact`, `prefix`, `suffix`, or
 	// `contains` match is case insensitive. For example, the matcher `data`
@@ -1609,9 +1607,9 @@ type ExtensionBindingMatchConditionTo struct {
 	// must be specified.
 	Destination *ExtensionBindingMatchConditionToDestination `json:"destination,omitempty"`
 	// NotDestination: Optional. Describes the negated properties of the request
-	// destination. Extension will not be invoked on requests that match the
-	// criteria specified in this field. At least one of destination or
-	// not_destination must be specified.
+	// destination. The extension will not be invoked on requests that match the
+	// criteria specified in this field. At least one of `destination` or
+	// `not_destination` must be specified.
 	NotDestination *ExtensionBindingMatchConditionToDestination `json:"notDestination,omitempty"`
 	// ForceSendFields is a list of field names (e.g. "Destination") to
 	// unconditionally include in API requests. By default, fields with empty or
@@ -1637,21 +1635,21 @@ type ExtensionBindingMatchConditionToDestination struct {
 	// HeaderSet: Optional. A set of HTTP headers to match against. If not
 	// specified, requests with any headers are matched.
 	HeaderSet *ExtensionBindingMatchConditionToDestinationHeaderSet `json:"headerSet,omitempty"`
-	// Hosts: Optional. A list of HTTP Hosts to match against. Limited to 10 hosts.
+	// Hosts: Optional. A list of HTTP hosts to match against. Limited to 10 hosts.
 	// If not specified, any host is allowed. If specified, a match occurs if any
 	// of the hosts matches the host value in the request.
 	Hosts []*ExtensionBindingMatchConditionStringMatch `json:"hosts,omitempty"`
 	// Paths: Optional. A list of paths to match against. Limited to 10 paths. If
 	// not specified, any path is allowed. Note that this path match includes the
-	// query parameters. For gRPC services, this should be a fully-qualified name
-	// of the form /package.service/method.
+	// query parameters. For gRPC services, this should be a fully qualified name
+	// of the form `/package.service/method`.
 	Paths []*ExtensionBindingMatchConditionStringMatch `json:"paths,omitempty"`
 	// Resources: Optional. A list of non-empty strings whose value is matched
-	// against the resource to which a request is sent (e.g., an Agent in
-	// AiApplication). If not specified, any resource is allowed. If specified, a
+	// against the resource to which a request is sent (for example, an `Agent` in
+	// `AiApplication`). If not specified, any resource is allowed. If specified, a
 	// match occurs if any of the resources matches the resource value in the
 	// request. Limited to 5 resources. When matching against resources in the
-	// AgentRegistry, use the URNs of the registry resources.
+	// Agent Registry, use the URNs of the registry resources.
 	Resources []*ExtensionBindingMatchConditionStringMatch `json:"resources,omitempty"`
 	// ForceSendFields is a list of field names (e.g. "HeaderSet") to
 	// unconditionally include in API requests. By default, fields with empty or
@@ -1765,11 +1763,12 @@ func (s ExtensionBindingTargetScope) MarshalJSON() ([]byte, error) {
 // ExtensionChain: A single extension chain wrapper that contains the match
 // conditions and extensions to execute.
 type ExtensionChain struct {
-	// Extensions: Required. A set of extensions to execute for the matching
-	// request. At least one extension is required. Up to 3 extensions can be
-	// defined for each extension chain for `LbTrafficExtension` resource.
+	// Extensions: Required. A set of extensions to run for the matching request.
+	// Up to three extensions can be defined for each extension chain for the
+	// `LbTrafficExtension` resource. You can define a maximum of two extensions
+	// for each extension chain for the `CdnEdgeExtension` resource.
 	// `LbRouteExtension`, `LbEdgeExtension`, and `LbTcpExtension` chains are
-	// limited to 1 extension per extension chain.
+	// limited to one extension per extension chain.
 	Extensions []*ExtensionChainExtension `json:"extensions,omitempty"`
 	// MatchCondition: Required. Conditions under which this chain is invoked for a
 	// request.
@@ -1909,7 +1908,7 @@ type ExtensionChainExtension struct {
 	// extension in the chain or the upstream will receive an empty body.
 	ResponseBodySendMode string `json:"responseBodySendMode,omitempty"`
 	// Service: Required. The reference to the service that runs the extension. To
-	// configure a callout extension, `service` must be a fully-qualified reference
+	// configure a callout extension, `service` must be a fully qualified reference
 	// to a backend service
 	// (https://cloud.google.com/compute/docs/reference/rest/v1/backendServices) in
 	// the format:
@@ -1922,9 +1921,8 @@ type ExtensionChainExtension struct {
 	// in the format:
 	// `projects/{project}/locations/{location}/wasmPlugins/{plugin}` or
 	// `//networkservices.googleapis.com/projects/{project}/locations/{location}/was
-	// mPlugins/{wasmPlugin}`. Plugin extensions are currently supported for the
-	// `LbTrafficExtension`, the `LbRouteExtension`, and the `LbEdgeExtension`
-	// resources.
+	// mPlugins/{wasmPlugin}`. Supports plugin extensions for `LbTrafficExtension`,
+	// `LbRouteExtension`, `LbEdgeExtension`, and `CdnEdgeExtension` resources.
 	Service string `json:"service,omitempty"`
 	// SupportedEvents: Optional. A set of events during request or response
 	// processing for which this extension is called. For the `LbTrafficExtension`
@@ -1949,9 +1947,9 @@ type ExtensionChainExtension struct {
 	//   "RESPONSE_BODY" - If included in `supported_events`, the extension is
 	// called when the HTTP response body arrives.
 	//   "REQUEST_TRAILERS" - If included in `supported_events`, the extension is
-	// called when the HTTP request trailers arrives.
+	// called when the HTTP request trailers arrive.
 	//   "RESPONSE_TRAILERS" - If included in `supported_events`, the extension is
-	// called when the HTTP response trailers arrives.
+	// called when the HTTP response trailers arrive.
 	SupportedEvents []string `json:"supportedEvents,omitempty"`
 	// Timeout: Optional. Specifies the timeout for each individual message on the
 	// stream. The timeout must be between `10`-`10000` milliseconds. Required for
@@ -4684,11 +4682,6 @@ type MulticastGroupConsumerActivation struct {
 	// consumer activation. Use the following format:
 	// `projects/*/locations/*/multicastConsumerAssociations/*`.
 	MulticastConsumerAssociation string `json:"multicastConsumerAssociation,omitempty"`
-	// MulticastGroup: Optional. The resource name of the multicast group created
-	// by the admin in the same zone as this multicast group consumer activation.
-	// Use the following format: `projects/*/locations/*/multicastGroups/*`. This
-	// field is deprecated. Use multicast_group_range_activation instead.
-	MulticastGroup string `json:"multicastGroup,omitempty"`
 	// MulticastGroupRangeActivation: Required. The resource name of the multicast
 	// group range activation created by the admin in the same zone as this
 	// multicast group consumer activation. Use the following format:
@@ -4974,16 +4967,16 @@ func (s Policy) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
-// ProducerExtension: `ProducerExtension` is a resource representing producer
-// defined configuration for their service extension.
+// ProducerExtension: `ProducerExtension` is a resource that represents a
+// producer-defined configuration for its service extension.
 type ProducerExtension struct {
 	// CreateTime: Output only. The timestamp when the resource was created.
 	CreateTime string `json:"createTime,omitempty"`
 	// Description: Optional. A human-readable description of the resource.
 	Description string `json:"description,omitempty"`
-	// Etag: Optional. Etag of the resource. If this is provided, it must match the
-	// server's etag. If the provided etag does not match the server's etag, the
-	// request will fail with a 409 ABORTED error.
+	// Etag: Optional. ETag of the resource. If this is provided, it must match the
+	// server's ETag. If the provided ETag doesn't match the server's ETag, then
+	// the request fails with a `409 ABORTED` error.
 	Etag string `json:"etag,omitempty"`
 	// ExtensionSettings: Required. The configuration for the service that this
 	// `ProducerExtension` offers.
@@ -4997,12 +4990,11 @@ type ProducerExtension struct {
 	// `projects/{project}/locations/{location}/producerExtensions/{producer_extensi
 	// on}`.
 	Name string `json:"name,omitempty"`
-	// Phase: Required. The phase in which this `ProducerExtension` should execute.
+	// Phase: Required. The phase in which this `ProducerExtension` runs.
 	//
 	// Possible values:
 	//   "PHASE_UNSPECIFIED" - Unspecified phase.
-	//   "TRAFFIC" - The `ProducerExtension` will be executed during the traffic
-	// phase.
+	//   "TRAFFIC" - Not supported.
 	//   "AUTHZ" - The `ProducerExtension` will be executed during the
 	// authorization phase.
 	Phase string `json:"phase,omitempty"`
@@ -5035,10 +5027,9 @@ type ProducerExtensionExtensionSettings struct {
 	// Authority: Optional. The `:authority` header in the request sent to the
 	// extension service.
 	Authority string `json:"authority,omitempty"`
-	// ObservabilityMode: Optional. Whether the extension should function in
-	// observability mode.
+	// ObservabilityMode: Optional. This field is not supported.
 	ObservabilityMode bool `json:"observabilityMode,omitempty"`
-	// Service: Required. URI of the PSC attachment.
+	// Service: Required. The URI of the Private Service Connect (PSC) attachment.
 	Service string `json:"service,omitempty"`
 	// SupportedEvents: Required. The event types supported by the extension.
 	//
@@ -5053,9 +5044,9 @@ type ProducerExtensionExtensionSettings struct {
 	//   "RESPONSE_BODY" - If included in `supported_events`, the extension is
 	// called when the HTTP response body arrives.
 	//   "REQUEST_TRAILERS" - If included in `supported_events`, the extension is
-	// called when the HTTP request trailers arrives.
+	// called when the HTTP request trailers arrive.
 	//   "RESPONSE_TRAILERS" - If included in `supported_events`, the extension is
-	// called when the HTTP response trailers arrives.
+	// called when the HTTP response trailers arrive.
 	SupportedEvents []string `json:"supportedEvents,omitempty"`
 	// ForceSendFields is a list of field names (e.g. "Authority") to
 	// unconditionally include in API requests. By default, fields with empty or
@@ -5147,8 +5138,9 @@ func (s ServiceBinding) MarshalJSON() ([]byte, error) {
 	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
-// ServiceLbPolicy: ServiceLbPolicy holds global load balancing and traffic
-// distribution configuration that can be applied to a BackendService.
+// ServiceLbPolicy: ServiceLbPolicy holds load balancing and traffic
+// distribution configuration that can be applied to a global or regional
+// BackendService.
 type ServiceLbPolicy struct {
 	// AutoCapacityDrain: Optional. Configuration to automatically move traffic
 	// away for unhealthy IG/NEG for the associated Backend Service.
@@ -5173,16 +5165,23 @@ type ServiceLbPolicy struct {
 	//   "LOAD_BALANCING_ALGORITHM_UNSPECIFIED" - The type of the loadbalancing
 	// algorithm is unspecified.
 	//   "SPRAY_TO_WORLD" - Balance traffic across all backends across the world
-	// proportionally based on capacity.
+	// proportionally based on capacity. Only supported for global ServiceLbPolicy
+	// with Cloud Service Mesh, not supported for regional ServiceLbPolicy.
 	//   "SPRAY_TO_REGION" - Direct traffic to the nearest region with endpoints
 	// and capacity before spilling over to other regions and spread the traffic
-	// from each client to all the MIGs/NEGs in a region.
+	// from each client to all the MIGs/NEGs in a region. For regional
+	// ServiceLbPolicy, traffic stays within the configured region and does not
+	// spill over to other regions.
 	//   "WATERFALL_BY_REGION" - Direct traffic to the nearest region with
 	// endpoints and capacity before spilling over to other regions. All MIGs/NEGs
 	// within a region are evenly loaded but each client might not spread the
-	// traffic to all the MIGs/NEGs in the region.
+	// traffic to all the MIGs/NEGs in the region. For regional ServiceLbPolicy,
+	// traffic stays within the configured region and does not spill over to other
+	// regions.
 	//   "WATERFALL_BY_ZONE" - Attempt to keep traffic in a single zone closest to
-	// the client, before spilling over to other zones.
+	// the client, before spilling over to other zones. For regional
+	// ServiceLbPolicy, traffic only spills over to other zones within the same
+	// region.
 	LoadBalancingAlgorithm string `json:"loadBalancingAlgorithm,omitempty"`
 	// Name: Identifier. Name of the ServiceLbPolicy resource. It matches pattern
 	// `projects/{project}/locations/{location}/serviceLbPolicies/{service_lb_policy
@@ -5212,7 +5211,7 @@ func (s ServiceLbPolicy) MarshalJSON() ([]byte, error) {
 }
 
 // ServiceLbPolicyAutoCapacityDrain: Option to specify if an unhealthy IG/NEG
-// should be considered for global load balancing and traffic routing.
+// should be considered for load balancing and traffic routing.
 type ServiceLbPolicyAutoCapacityDrain struct {
 	// Enable: Optional. If set to 'True', an unhealthy IG/NEG will be set as
 	// drained. - An IG/NEG is considered unhealthy if less than 25% of the
@@ -5807,6 +5806,29 @@ type WasmPlugin struct {
 	CreateTime string `json:"createTime,omitempty"`
 	// Description: Optional. A human-readable description of the resource.
 	Description string `json:"description,omitempty"`
+	// KmsKeyName: Optional. The name of the customer-managed CryptoKey
+	// (https://cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys)
+	// to be used to encrypt the `WasmPlugin` image (provided by image_uri) and
+	// configuration (provided by plugin_config_data or plugin_config_uri) that are
+	// stored by the `Service Extensions` product at rest. Format:
+	// `projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}`
+	//  By default, Google Cloud automatically encrypts all data at rest using
+	// Google-owned and Google-managed encryption keys. If you need ownership and
+	// control of the keys that protect your data at rest, you can specify a
+	// customer-managed encryption key (CMEK) to encrypt your `WasmPlugin` data.
+	// For more information, see Using customer-managed encryption keys
+	// (https://cloud.google.com/service-extensions/docs/cmek).
+	KmsKeyName string `json:"kmsKeyName,omitempty"`
+	// KmsKeyVersion: Output only. The name of the specific CryptoKeyVersion
+	// (https://cloud.google.com/kms/docs/reference/rest/v1/projects.locations.keyRings.cryptoKeys.cryptoKeyVersions)
+	// used to encrypt the `WasmPlugin` data, if the kms_key_name field is set.
+	// Format:
+	// `projects/{project}/locations/{location}/keyRings/{keyring}/cryptoKeys/{key}/
+	// cryptoKeyVersions/{version}` This is a read-only field. `WasmPlugin` data is
+	// automatically encrypted using the most recent `CryptoKeyVersion` of the
+	// `CryptoKey` provided in the `kms_key_name` field. See Cloud KMS resources
+	// (https://cloud.google.com/kms/docs/resource-hierarchy) for more information.
+	KmsKeyVersion string `json:"kmsKeyVersion,omitempty"`
 	// Labels: Optional. Set of labels associated with the `WasmPlugin` resource.
 	// The format must comply with the following requirements
 	// (/compute/docs/labeling-resources#requirements).
@@ -5871,8 +5893,8 @@ type WasmPluginLogConfig struct {
 	Enable bool `json:"enable,omitempty"`
 	// MinLogLevel: Optional. Non-empty default. Specifies the lowest level of the
 	// plugin logs that are exported to Cloud Logging. This setting relates to the
-	// logs generated by using logging statements in your Wasm code. This field is
-	// can be set only if logging is enabled for the plugin. If the field is not
+	// logs generated by using logging statements in your Wasm code. This field can
+	// be set only if logging is enabled for the plugin. If the field is not
 	// provided when logging is enabled, it is set to `INFO` by default.
 	//
 	// Possible values:
@@ -9997,8 +10019,8 @@ type ProjectsLocationsExtensionBindingsDeleteCall struct {
 
 // Delete: Deletes the specified `ExtensionBinding` resource.
 //
-//   - name: A name of the `ExtensionBinding` resource to delete. Must be in the
-//     format
+//   - name: The name of the `ExtensionBinding` resource to delete. Must be in
+//     the format
 //     `projects/{project}/locations/{location}/extensionBindings/{extension_bindi
 //     ng}`.
 func (r *ProjectsLocationsExtensionBindingsService) Delete(name string) *ProjectsLocationsExtensionBindingsDeleteCall {
@@ -10007,8 +10029,8 @@ func (r *ProjectsLocationsExtensionBindingsService) Delete(name string) *Project
 	return c
 }
 
-// Etag sets the optional parameter "etag": The etag of the ExtensionBinding to
-// delete.
+// Etag sets the optional parameter "etag": The ETag of the `ExtensionBinding`
+// to delete.
 func (c *ProjectsLocationsExtensionBindingsDeleteCall) Etag(etag string) *ProjectsLocationsExtensionBindingsDeleteCall {
 	c.urlParams_.Set("etag", etag)
 	return c
@@ -10105,7 +10127,7 @@ type ProjectsLocationsExtensionBindingsGetCall struct {
 
 // Get: Gets details of the specified `ExtensionBinding` resource.
 //
-//   - name: A name of the `ExtensionBinding` resource to get. Must be in the
+//   - name: The name of the `ExtensionBinding` resource to get. Must be in the
 //     format
 //     `projects/{project}/locations/{location}/extensionBindings/{extension_bindi
 //     ng}`.
@@ -10235,7 +10257,7 @@ func (c *ProjectsLocationsExtensionBindingsListCall) PageSize(pageSize int64) *P
 }
 
 // PageToken sets the optional parameter "pageToken": The value returned by the
-// last `ListExtensionBindingsResponse` Indicates that this is a continuation
+// last `ListExtensionBindingsResponse`. Indicates that this is a continuation
 // of a prior `ListExtensionBindings` call, and that the system should return
 // the next page of data.
 func (c *ProjectsLocationsExtensionBindingsListCall) PageToken(pageToken string) *ProjectsLocationsExtensionBindingsListCall {
@@ -10380,10 +10402,9 @@ func (r *ProjectsLocationsExtensionBindingsService) Patch(name string, extension
 
 // UpdateMask sets the optional parameter "updateMask": Field mask is used to
 // specify the fields to be overwritten in the `ExtensionBinding` resource by
-// the update. The fields specified in the update_mask are relative to the
-// resource, not the full request. A field will be overwritten if it is in the
-// mask. If the user does not provide a mask then all fields will be
-// overwritten.
+// the update. The fields specified in the `update_mask` are relative to the
+// resource, not the full request. A field is overwritten if it is in the mask.
+// If the user does not provide a mask then all fields are overwritten.
 func (c *ProjectsLocationsExtensionBindingsPatchCall) UpdateMask(updateMask string) *ProjectsLocationsExtensionBindingsPatchCall {
 	c.urlParams_.Set("updateMask", updateMask)
 	return c
@@ -17125,7 +17146,7 @@ func (r *ProjectsLocationsProducerExtensionsService) Create(parent string, produ
 }
 
 // ProducerExtensionId sets the optional parameter "producerExtensionId":
-// Required. Short name of the `ProducerExtension` resource to be created.
+// Required. The short name of the `ProducerExtension` resource to be created.
 func (c *ProjectsLocationsProducerExtensionsCreateCall) ProducerExtensionId(producerExtensionId string) *ProjectsLocationsProducerExtensionsCreateCall {
 	c.urlParams_.Set("producerExtensionId", producerExtensionId)
 	return c
@@ -17225,8 +17246,8 @@ type ProjectsLocationsProducerExtensionsDeleteCall struct {
 
 // Delete: Deletes the specified `ProducerExtension` resource.
 //
-//   - name: A name of the `ProducerExtension` resource to delete. Must be in the
-//     format
+//   - name: The name of the `ProducerExtension` resource to delete. It must be
+//     in this format:
 //     `projects/{project}/locations/{location}/producerExtensions/{producer_exten
 //     sion}`.
 func (r *ProjectsLocationsProducerExtensionsService) Delete(name string) *ProjectsLocationsProducerExtensionsDeleteCall {
@@ -17235,7 +17256,7 @@ func (r *ProjectsLocationsProducerExtensionsService) Delete(name string) *Projec
 	return c
 }
 
-// Etag sets the optional parameter "etag": The etag of the ProducerExtension
+// Etag sets the optional parameter "etag": The ETag of the `ProducerExtension`
 // to delete.
 func (c *ProjectsLocationsProducerExtensionsDeleteCall) Etag(etag string) *ProjectsLocationsProducerExtensionsDeleteCall {
 	c.urlParams_.Set("etag", etag)
@@ -17333,8 +17354,8 @@ type ProjectsLocationsProducerExtensionsGetCall struct {
 
 // Get: Gets details of the specified `ProducerExtension` resource.
 //
-//   - name: A name of the `ProducerExtension` resource to get. Must be in the
-//     format
+//   - name: The name of the `ProducerExtension` resource to get. It must be in
+//     this format:
 //     `projects/{project}/locations/{location}/producerExtensions/{producer_exten
 //     sion}`.
 func (r *ProjectsLocationsProducerExtensionsService) Get(name string) *ProjectsLocationsProducerExtensionsGetCall {
@@ -17447,7 +17468,7 @@ type ProjectsLocationsProducerExtensionsListCall struct {
 // List: Lists `ProducerExtension` resources in a given project and location.
 //
 //   - parent: The project and location from which the `ProducerExtension`
-//     resources should be listed, specified in the format
+//     resources should be listed, specified in this format:
 //     `projects/{project}/locations/{location}`.
 func (r *ProjectsLocationsProducerExtensionsService) List(parent string) *ProjectsLocationsProducerExtensionsListCall {
 	c := &ProjectsLocationsProducerExtensionsListCall{s: r.s, urlParams_: make(gensupport.URLParams)}
@@ -17463,9 +17484,9 @@ func (c *ProjectsLocationsProducerExtensionsListCall) PageSize(pageSize int64) *
 }
 
 // PageToken sets the optional parameter "pageToken": The value returned by the
-// last `ListProducerExtensionsResponse` Indicates that this is a continuation
-// of a prior `ListProducerExtensions` call, and that the system should return
-// the next page of data.
+// last `ListProducerExtensionsResponse`. It indicates that this is a
+// continuation of a prior `ListProducerExtensions` call, and that the system
+// should return the next page of data.
 func (c *ProjectsLocationsProducerExtensionsListCall) PageToken(pageToken string) *ProjectsLocationsProducerExtensionsListCall {
 	c.urlParams_.Set("pageToken", pageToken)
 	return c
