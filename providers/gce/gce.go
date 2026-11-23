@@ -231,14 +231,6 @@ type Cloud struct {
 	// Enable this ony when the Node's .spec.providerID can be fully trusted.
 	projectFromNodeProviderID bool
 
-	// enableDiscretePortForwarding enables forwarding of individual ports
-	// instead of port ranges in Forwarding Rules for external load balancers.
-	enableDiscretePortForwarding bool
-
-	// externalInstanceGroupsPrefix if set, finds instance groups with
-	// the provided prefix and considers them for ILB backends.
-	externalInstanceGroupsPrefix string
-
 	// enableRBSDefaultForL4NetLB disable Service controller from picking up services by default
 	enableRBSDefaultForL4NetLB bool
 
@@ -361,10 +353,6 @@ type ConfigGlobal struct {
 	// FirewallRulesManagement indicates whether the provider should handle all firewall
 	// operations, such as creation, deletion, and updates.
 	FirewallRulesManagement string `gcfg:"firewall-rules-management"`
-
-	// ExternalInstanceGroupsPrefix, when not-empty, is used to filter instance groups (from an external GCP Project)
-	// and include them in the backend for ILB.
-	ExternalInstanceGroupsPrefix string `gcfg:"external-instance-groups-prefix"`
 }
 
 // ConfigFile is the struct used to parse the /etc/gce.conf configuration file.
@@ -400,9 +388,6 @@ type CloudConfig struct {
 	AlphaFeatureGate        *AlphaFeatureGate
 	StackType               string
 	FirewallRulesManagement string
-
-	// Separating our carry from the upstream to avoid a reflow
-	ExternalInstanceGroupsPrefix string
 }
 
 func init() {
@@ -410,8 +395,7 @@ func init() {
 		ProviderName,
 		func(config io.Reader) (cloudprovider.Interface, error) {
 			return newGCECloud(config)
-		},
-	)
+		})
 }
 
 // Services is the set of all versions of the compute service.
@@ -502,8 +486,6 @@ func GenerateCloudConfig(configFile *ConfigFile) (cloudConfig *CloudConfig, err 
 			return nil, fmt.Errorf("invalid firewall-rules-management %q: must be %q or %q",
 				m, firewallRulesManagementEnabled, firewallRulesManagementDisabled)
 		}
-
-		cloudConfig.ExternalInstanceGroupsPrefix = configFile.Global.ExternalInstanceGroupsPrefix
 	}
 
 	// retrieve projectID and zone
@@ -754,9 +736,6 @@ func CreateGCECloud(config *CloudConfig) (*Cloud, error) {
 		stackType:                StackType(config.StackType),
 		firewallRulesManagement:  FirewallRulesManagement(config.FirewallRulesManagement),
 	}
-
-	// Moving our carry code out of the literal to avoid conflicts
-	gce.externalInstanceGroupsPrefix = config.ExternalInstanceGroupsPrefix
 
 	gce.manager = &gceServiceManager{gce}
 	gce.aneService = &gceANEService{gce: gce}
